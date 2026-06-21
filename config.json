@@ -1,0 +1,11 @@
+{
+  "FRONIUS_EXPORT_IS_POSITIVE": false,
+  "LATITUDE": -33.8688,
+  "LONGITUDE": 151.2093,
+  "TIMEZONE": "Australia/Sydney",
+  "CITY_NAME": "Sydney",
+  "VOLTAGE": 240,
+  "MIN_AMPS": 5,
+  "MAX_AMPS": 32,
+  "BUFFER_WATTS": 150
+}
