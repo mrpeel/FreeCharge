@@ -25,10 +25,10 @@ This file defines the system objectives, feature backlog catalog, active technic
 | Feature ID | Feature Name | Description | Status | Verification Method |
 |---|---|---|---|---|
 | F-001 | Repository Setup | Git initialization, .gitignore, virtual environment, and dependency management setup | **Completed** | Directory check & git status |
-| F-002 | Hybrid Config & Env | Implement config.json for non-sensitive values and `.env` file for secrets/IPs | Backlog | Unit test validation of configuration parsing |
-| F-003 | Fronius API Client | Implement local client to fetch and parse solar export/grid status from Fronius inverter | Backlog | Integration test against simulated or mock server response |
-| F-004 | Solar Control Logic | Implement excess calculation, voltage-amp conversion, and status checks with caching | Backlog | Unit tests with various solar and state scenarios |
-| F-005 | Tesla Mock API | Implement a mock Tesla Fleet API client that responds with realistic data and state mutations | Backlog | Parity check and trace logging in dry-runs |
+| F-002 | Hybrid Config & Env | Implement config.json for non-sensitive values and `.env` file for secrets/IPs | **Completed** | Unit test validation of configuration parsing |
+| F-003 | Fronius API Client | Implement local client to fetch and parse solar export/grid status from Fronius inverter | **Completed** | Integration test against simulated or mock server response |
+| F-004 | Solar Control Logic | Implement excess calculation, voltage-amp conversion, and status checks with caching | **Completed** | Unit tests with various solar and state scenarios |
+| F-005 | Tesla Mock API | Implement a mock Tesla Fleet API client that responds with realistic data and state mutations | **Completed** | Parity check and trace logging in dry-runs |
 | F-006 | Scheduled Runner | Shell script wrapper for Synology DSM task scheduler execution and logs | Backlog | Manual runner verification |
 
 ---
