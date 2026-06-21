@@ -29,6 +29,7 @@ This file defines the system objectives, feature backlog catalog, active technic
 | F-003 | Fronius API Client | Implement local client to fetch and parse solar export/grid status from Fronius inverter | **Completed** | Integration test against simulated or mock server response |
 | F-004 | Solar Control Logic | Implement excess calculation, voltage-amp conversion, and status checks with caching | **Completed** | Unit tests with various solar and state scenarios |
 | F-005 | Tesla Mock API | Implement a mock Tesla Fleet API client that responds with realistic data and state mutations | **Completed** | Parity check and trace logging in dry-runs |
+| F-007 | Tesla Gating Checks | Verify if the Tesla is at home, plugged in, and not fully charged before regulating charger state | **Completed** | Proximity checks and E2E integration safety disconnect tests |
 | F-006 | Scheduled Runner | Shell script wrapper for Synology DSM task scheduler execution and logs | Backlog | Manual runner verification |
 
 ---

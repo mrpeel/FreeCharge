@@ -24,14 +24,19 @@ def load_config():
     with open(CONFIG_PATH, "r") as f:
         config = json.load(f)
     
-    # Load sensitive config from environment variables
+    # Load sensitive config & coordinates from environment variables
     config["FRONIUS_IP"] = os.getenv("FRONIUS_IP", "192.168.1.150")
     config["TESLA_VIN"] = os.getenv("TESLA_VIN", "5YJ3XXXXXXXXXXXXX")
     config["TESLA_API_TOKEN"] = os.getenv("TESLA_API_TOKEN", "YOUR_TESLA_API_ACCESS_TOKEN")
+    config["LATITUDE"] = float(os.getenv("LATITUDE", "-33.8688"))
+    config["LONGITUDE"] = float(os.getenv("LONGITUDE", "151.2093"))
     
     # Mocking behavior flag: defaults to True for safety
     mock_tesla_str = os.getenv("MOCK_TESLA", "True").lower()
     config["MOCK_TESLA"] = mock_tesla_str in ("true", "1", "yes", "on")
+    
+    # Mock API failure rate (0.0 means always succeed)
+    config["MOCK_API_FAILURE_RATE"] = float(os.getenv("MOCK_API_FAILURE_RATE", "0.05"))
     
     return config
 
@@ -91,13 +96,71 @@ def get_excess_solar(config, mock_power=None):
     else:
         return -float(p_grid)
 
+def is_vehicle_at_home(vehicle_lat, vehicle_lon, home_lat, home_lon, tolerance=0.001):
+    """Checks if the vehicle is close to home coordinates."""
+    return abs(vehicle_lat - home_lat) < tolerance and abs(vehicle_lon - home_lon) < tolerance
+
+def get_tesla_vehicle_data(config):
+    """Fetches real vehicle data or returns mock data depending on configuration."""
+    if config["MOCK_TESLA"]:
+        # Load mock values from environment or set defaults
+        mock_home = os.getenv("MOCK_VEHICLE_HOME", "True").lower() in ("true", "1", "yes", "on")
+        mock_plugged = os.getenv("MOCK_VEHICLE_PLUGGED", "True").lower() in ("true", "1", "yes", "on")
+        mock_soc = int(os.getenv("MOCK_VEHICLE_SOC", "75"))
+        mock_limit = int(os.getenv("MOCK_VEHICLE_CHARGE_LIMIT", "90"))
+        
+        # Set mock coordinates based on home status
+        if mock_home:
+            lat = config["LATITUDE"]
+            lon = config["LONGITUDE"]
+        else:
+            lat = config["LATITUDE"] + 0.5
+            lon = config["LONGITUDE"] + 0.5
+            
+        charging_state = "Stopped" if mock_plugged else "Disconnected"
+        if mock_soc >= mock_limit:
+            charging_state = "Complete"
+            
+        return {
+            "latitude": lat,
+            "longitude": lon,
+            "charging_state": charging_state,
+            "battery_level": mock_soc,
+            "charge_limit_soc": mock_limit
+        }
+
+    # Real implementation
+    headers = {
+        "Authorization": f"Bearer {config['TESLA_API_TOKEN']}",
+        "Content-Type": "application/json"
+    }
+    url = f"https://api.tesla.com/api/1/vehicles/{config['TESLA_VIN']}/vehicle_data"
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json().get("response", {})
+            drive_state = data.get("drive_state", {})
+            charge_state = data.get("charge_state", {})
+            return {
+                "latitude": drive_state.get("latitude", 0.0),
+                "longitude": drive_state.get("longitude", 0.0),
+                "charging_state": charge_state.get("charging_state", "Disconnected"),
+                "battery_level": charge_state.get("battery_level", 0),
+                "charge_limit_soc": charge_state.get("charge_limit_soc", 100)
+            }
+        print(f"[{dt.now()}] API error response from Tesla on /vehicle_data: {response.text}")
+        return None
+    except Exception as e:
+        print(f"[{dt.now()}] Connection failure to Tesla vehicle data API: {e}")
+        return None
+
 def call_tesla_api(config, endpoint, payload=None):
     """Calls Tesla Fleet API or simulates it depending on configuration."""
     now_str = dt.now().isoformat()
     if config["MOCK_TESLA"]:
         # Random but realistic mocking of the data / execution responses
-        success_rate = 0.95 # 95% API success rate for realism
-        is_success = random.random() < success_rate
+        failure_rate = config.get("MOCK_API_FAILURE_RATE", 0.05)
+        is_success = random.random() >= failure_rate
         
         simulated_soc = random.randint(40, 85)
         
@@ -156,13 +219,50 @@ def run_solar_loop(override_time=None, mock_power=None):
             print(f"[{now}] Out of daylight hours. Loop idle.")
         return
 
-    # 2. ACTIVE SUNLIGHT TRACKING WINDOW
+    # 2. TESLA STATE GATEKEEPING ROUTINE
+    vehicle_data = get_tesla_vehicle_data(config)
+    if vehicle_data is None:
+        return # Skip loop if telemetry is missing
+        
+    is_home = is_vehicle_at_home(
+        vehicle_data["latitude"], 
+        vehicle_data["longitude"], 
+        config["LATITUDE"], 
+        config["LONGITUDE"], 
+        config.get("LOCATION_TOLERANCE", 0.001)
+    )
+    is_plugged = vehicle_data["charging_state"] != "Disconnected"
+    soc = vehicle_data["battery_level"]
+    charge_limit = vehicle_data.get("charge_limit_soc", 100)
+    is_full = soc >= charge_limit
+    
+    current_charging = cache.get("charging", False)
+    
+    if not is_home or not is_plugged or is_full:
+        reason = []
+        if not is_home:
+            reason.append("vehicle not at home")
+        if not is_plugged:
+            reason.append("vehicle not plugged in")
+        if is_full:
+            reason.append(f"vehicle charged to limit ({soc}% >= {charge_limit}%)")
+            
+        print(f"[{now}] Gating criteria failed: {', '.join(reason)}. System idle.")
+        
+        # Turn off charging if cached state indicates we were charging
+        if current_charging:
+            print(f"[{now}] Disabling charging due to gate failure.")
+            if call_tesla_api(config, "charge_stop"):
+                cache["charging"] = False
+                write_cache(cache)
+        return
+
+    # 3. ACTIVE SUNLIGHT TRACKING WINDOW
     excess_watts = get_excess_solar(config, mock_power=mock_power)
     if excess_watts is None:
         return # Skip calculation if telemetry is missing
 
     target_charging, target_amps = calculate_target_amps(excess_watts, config)
-    current_charging = cache.get("charging", False)
     current_amps = cache.get("amps", config["MIN_AMPS"])
 
     # 3. STATE COMPARATIVE TRANSITIONS
