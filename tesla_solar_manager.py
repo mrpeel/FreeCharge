@@ -194,11 +194,15 @@ def calculate_target_amps(excess_watts, config):
     usable_watts = excess_watts - config["BUFFER_WATTS"]
     min_power_threshold = config["MIN_AMPS"] * config["VOLTAGE"]
     
+    print(f"[{dt.now()}] Solar Control Inputs: Excess = {excess_watts} W, Buffer = {config['BUFFER_WATTS']} W, Usable surplus = {usable_watts} W, System Voltage = {config['VOLTAGE']} V")
+    
     if usable_watts < min_power_threshold:
+        print(f"[{dt.now()}] Solar Control Decision: Usable surplus ({usable_watts} W) is below minimum charge threshold ({min_power_threshold} W).")
         return False, config["MIN_AMPS"]
         
     calculated_amps = int(usable_watts // config["VOLTAGE"])
     target_amps = min(config["MAX_AMPS"], max(config["MIN_AMPS"], calculated_amps))
+    print(f"[{dt.now()}] Solar Control Decision: Usable surplus ({usable_watts} W) yields calculated amps = {calculated_amps} A. Target current = {target_amps} A (Bounded: [{config['MIN_AMPS']} A, {config['MAX_AMPS']} A]).")
     return True, target_amps
 
 def run_solar_loop(override_time=None, mock_power=None):
@@ -236,6 +240,11 @@ def run_solar_loop(override_time=None, mock_power=None):
     charge_limit = vehicle_data.get("charge_limit_soc", 100)
     is_full = soc >= charge_limit
     
+    print(f"[{now}] Tesla Telemetry Status:")
+    print(f"  - Location: {'Home' if is_home else 'Away'} (Vehicle: {vehicle_data['latitude']:.4f}, {vehicle_data['longitude']:.4f} / Home: {config['LATITUDE']:.4f}, {config['LONGITUDE']:.4f})")
+    print(f"  - Plugged In: {'Yes' if is_plugged else 'No'} (Status: {vehicle_data['charging_state']})")
+    print(f"  - Charge SoC: {soc}% / Limit: {charge_limit}%")
+    
     current_charging = cache.get("charging", False)
     
     if not is_home or not is_plugged or is_full:
@@ -251,7 +260,7 @@ def run_solar_loop(override_time=None, mock_power=None):
         
         # Turn off charging if cached state indicates we were charging
         if current_charging:
-            print(f"[{now}] Disabling charging due to gate failure.")
+            print(f"[{now}] Disabling charging due to gate failure. Sending command /charge_stop to Tesla...")
             if call_tesla_api(config, "charge_stop"):
                 cache["charging"] = False
                 write_cache(cache)
@@ -268,14 +277,15 @@ def run_solar_loop(override_time=None, mock_power=None):
     # 3. STATE COMPARATIVE TRANSITIONS
     if target_charging:
         if not current_charging:
-            print(f"[{now}] Solar surplus ({excess_watts} W) detected. Starting charge at {target_amps} A.")
+            print(f"[{now}] Solar surplus ({excess_watts} W) detected. Starting charge at {target_amps} A. Sending command /charge_start to Tesla...")
             if call_tesla_api(config, "charge_start"):
+                print(f"[{now}] Sending command /set_charging_amps with payload {{'charging_amps': {target_amps}}} to Tesla...")
                 if call_tesla_api(config, "set_charging_amps", {"charging_amps": target_amps}):
                     cache["charging"] = True
                     cache["amps"] = target_amps
                     write_cache(cache)
         elif target_amps != current_amps:
-            print(f"[{now}] Surplus changed. Adjusting charge: {current_amps} A -> {target_amps} A.")
+            print(f"[{now}] Surplus changed. Adjusting charge: {current_amps} A -> {target_amps} A. Sending command /set_charging_amps to Tesla...")
             if call_tesla_api(config, "set_charging_amps", {"charging_amps": target_amps}):
                 cache["amps"] = target_amps
                 write_cache(cache)
@@ -283,7 +293,7 @@ def run_solar_loop(override_time=None, mock_power=None):
             print(f"[{now}] In balance. Maintaining {current_amps} A.")
     else:
         if current_charging:
-            print(f"[{now}] Solar surplus dropped to ({excess_watts} W). Stopping charge.")
+            print(f"[{now}] Solar surplus dropped to ({excess_watts} W). Stopping charge. Sending command /charge_stop to Tesla...")
             if call_tesla_api(config, "charge_stop"):
                 cache["charging"] = False
                 write_cache(cache)
