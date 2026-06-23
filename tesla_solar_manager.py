@@ -14,6 +14,41 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 CACHE_PATH = os.path.join(BASE_DIR, "state_cache.json")
 ENV_PATH = os.path.join(BASE_DIR, ".env")
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
+
+# Redefine print to write to daily log files and standard output
+def custom_print(*args, **kwargs):
+    message = " ".join(str(arg) for arg in args)
+    
+    # Write to actual stdout terminal
+    import sys
+    sys.__stdout__.write(message + "\n")
+    
+    # Write to daily log
+    try:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        local_tz = ZoneInfo("Australia/Sydney")
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r") as f:
+                cfg = json.load(f)
+                if "TIMEZONE" in cfg:
+                    local_tz = ZoneInfo(cfg["TIMEZONE"])
+        now = dt.now(local_tz)
+    except Exception:
+        now = dt.now()
+        
+    log_file = os.path.join(LOGS_DIR, f"execution_{now.strftime('%Y%m%d')}.log")
+    try:
+        with open(log_file, "a") as f:
+            if message.startswith("[202") or message.startswith("["):
+                f.write(message + "\n")
+            else:
+                f.write(f"[{dt.now()}] {message}\n")
+    except Exception as e:
+        sys.__stdout__.write(f"[{dt.now()}] Logging write error: {e}\n")
+
+# Override built-in print globally
+print = custom_print
 
 # Load environment variables
 if os.path.exists(ENV_PATH):
@@ -71,6 +106,24 @@ def calculate_median(values):
     if n % 2 != 0:
         return sorted_vals[mid]
     return (sorted_vals[mid - 1] + sorted_vals[mid]) / 2.0
+
+def cleanup_old_logs(logs_dir, max_days):
+    """Prunes log files older than max_days in logs_dir."""
+    if not os.path.exists(logs_dir):
+        return
+    now = dt.now()
+    cutoff_time = now - datetime.timedelta(days=max_days)
+    for filename in os.listdir(logs_dir):
+        if filename.startswith("execution_") and filename.endswith(".log"):
+            filepath = os.path.join(logs_dir, filename)
+            try:
+                # Use file modification timestamp
+                file_mtime = dt.fromtimestamp(os.path.getmtime(filepath))
+                if file_mtime < cutoff_time:
+                    os.remove(filepath)
+                    print(f"Cleaned up old log file: {filename}")
+            except Exception as e:
+                print(f"Failed to delete log file {filename}: {e}")
 
 def get_daylight_window(config, override_time=None):
     """Calculates sunrise and sunset for the current day."""
@@ -225,6 +278,7 @@ def calculate_target_amps(excess_watts, config):
 def run_solar_loop(override_time=None, mock_power=None):
     """Main execution loop for solar tracking logic."""
     config = load_config()
+    cleanup_old_logs(LOGS_DIR, config.get("MAX_LOG_DAYS", 30))
     cache = read_cache()
     sunrise, sunset, now = get_daylight_window(config, override_time=override_time)
 

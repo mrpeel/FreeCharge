@@ -31,6 +31,7 @@ This file defines the system objectives, feature backlog catalog, active technic
 | F-005 | Tesla Mock API | Implement a mock Tesla Fleet API client that responds with realistic data and state mutations | **Completed** | Parity check and trace logging in dry-runs |
 | F-007 | Tesla Gating Checks | Verify if the Tesla is at home, plugged in, and not fully charged before regulating charger state | **Completed** | Proximity checks and E2E integration safety disconnect tests |
 | F-008 | Rolling Averages & Throttle | Smooth out solar fluctuations via 10-minute median and throttle cloud requests to 10-minute intervals | **Completed** | Sliding window and throttling integration tests |
+| F-009 | Log Rotation & Cleanup | Direct print statements to daily logs and automatically prune logs older than 30 days | **Completed** | Age-based pruning and directory isolation unit tests |
 | F-006 | Scheduled Runner | Shell script wrapper for Synology DSM task scheduler execution and logs | Backlog | Manual runner verification |
 
 ---

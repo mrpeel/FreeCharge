@@ -16,6 +16,11 @@ import tesla_solar_manager
 TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TEST_DIR)
 
+# Redirect logs directory globally for test isolation
+tesla_solar_manager.LOGS_DIR = os.path.join(TEST_DIR, "temp_test_logs")
+if not os.path.exists(tesla_solar_manager.LOGS_DIR):
+    os.makedirs(tesla_solar_manager.LOGS_DIR, exist_ok=True)
+
 class TestSolarControlMath(unittest.TestCase):
     def setUp(self):
         self.config = {
@@ -156,6 +161,42 @@ class TestDampingAndThrottling(unittest.TestCase):
         self.assertEqual(tesla_solar_manager.calculate_median([]), 0.0)
         # Single element
         self.assertEqual(tesla_solar_manager.calculate_median([99]), 99.0)
+
+
+class TestLogRotation(unittest.TestCase):
+    def setUp(self):
+        self.logs_dir = tesla_solar_manager.LOGS_DIR
+        # Clean directory
+        for f in os.listdir(self.logs_dir):
+            os.remove(os.path.join(self.logs_dir, f))
+
+    def tearDown(self):
+        for f in os.listdir(self.logs_dir):
+            os.remove(os.path.join(self.logs_dir, f))
+
+    def test_log_cleanup_pruning(self):
+        old_file = os.path.join(self.logs_dir, "execution_20200101.log")
+        new_file = os.path.join(self.logs_dir, "execution_20260101.log")
+        
+        # Create dummy log files
+        with open(old_file, "w") as f:
+            f.write("Old log message")
+        with open(new_file, "w") as f:
+            f.write("Recent log message")
+            
+        # Set file modification times (old_file = 40 days ago, new_file = today/recent)
+        now_ts = time.time()
+        old_ts = now_ts - (40 * 24 * 3600) # 40 days ago
+        
+        os.utime(old_file, (old_ts, old_ts))
+        os.utime(new_file, (now_ts, now_ts))
+        
+        # Run cleanup
+        tesla_solar_manager.cleanup_old_logs(self.logs_dir, max_days=30)
+        
+        # Verify old file is deleted, new file is kept
+        self.assertFalse(os.path.exists(old_file))
+        self.assertTrue(os.path.exists(new_file))
 
 
 # E2E Mock Server Handler
