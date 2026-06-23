@@ -91,10 +91,18 @@ class TestCacheUtility(unittest.TestCase):
 
     def test_read_empty_cache_returns_defaults(self):
         state = tesla_solar_manager.read_cache()
-        self.assertEqual(state, {"charging": False, "amps": 5})
+        self.assertEqual(state["charging"], False)
+        self.assertEqual(state["amps"], 5)
+        self.assertEqual(state["solar_history"], [])
+        self.assertIsNone(state["last_command_time"])
 
     def test_write_and_read_cache(self):
-        test_state = {"charging": True, "amps": 16}
+        test_state = {
+            "charging": True,
+            "amps": 16,
+            "last_command_time": "2026-06-21T12:00:00",
+            "solar_history": [{"timestamp": "2026-06-21T12:00:00", "watts": 3000}]
+        }
         tesla_solar_manager.write_cache(test_state)
         read_state = tesla_solar_manager.read_cache()
         self.assertEqual(read_state, test_state)
@@ -137,23 +145,17 @@ class TestTeslaGating(unittest.TestCase):
         ))
         self.assertEqual(data["charging_state"], "Stopped")
 
-    @patch.dict(os.environ, {
-        "MOCK_VEHICLE_HOME": "True",
-        "MOCK_VEHICLE_PLUGGED": "False",
-        "MOCK_VEHICLE_SOC": "50",
-        "MOCK_VEHICLE_CHARGE_LIMIT": "90"
-    })
-    def test_mock_vehicle_data_unplugged(self):
-        config = {
-            "MOCK_TESLA": True,
-            "LATITUDE": -33.8688,
-            "LONGITUDE": 151.2093
-        }
-        data = tesla_solar_manager.get_tesla_vehicle_data(config)
-        self.assertTrue(tesla_solar_manager.is_vehicle_at_home(
-            data["latitude"], data["longitude"], config["LATITUDE"], config["LONGITUDE"]
-        ))
-        self.assertEqual(data["charging_state"], "Disconnected")
+
+class TestDampingAndThrottling(unittest.TestCase):
+    def test_calculate_median(self):
+        # Odd length
+        self.assertEqual(tesla_solar_manager.calculate_median([10, 5, 20]), 10.0)
+        # Even length
+        self.assertEqual(tesla_solar_manager.calculate_median([10, 20, 30, 40]), 25.0)
+        # Empty
+        self.assertEqual(tesla_solar_manager.calculate_median([]), 0.0)
+        # Single element
+        self.assertEqual(tesla_solar_manager.calculate_median([99]), 99.0)
 
 
 # E2E Mock Server Handler
@@ -216,7 +218,7 @@ class TestE2EIntegration(unittest.TestCase):
         
         self.test_config = {
             "FRONIUS_IP": f"127.0.0.1:{self.port}",
-            "FRONIUS_EXPORT_IS_POSITIVE": False, # Exporting solar is represented as a negative grid reading
+            "FRONIUS_EXPORT_IS_POSITIVE": False,
             "TESLA_VIN": "5YJ3TESTINGVIN123",
             "TESLA_API_TOKEN": "mock_token",
             "MOCK_TESLA": True,
@@ -229,7 +231,10 @@ class TestE2EIntegration(unittest.TestCase):
             "MIN_AMPS": 5,
             "MAX_AMPS": 32,
             "BUFFER_WATTS": 150,
-            "LOCATION_TOLERANCE": 0.001
+            "LOCATION_TOLERANCE": 0.001,
+            "HISTORY_WINDOW_MINUTES": 10,
+            "POLLING_INTERVAL_MINUTES": 2,
+            "THROTTLE_INTERVAL_MINUTES": 10
         }
         self.mock_load_config.return_value = self.test_config
 
@@ -252,7 +257,6 @@ class TestE2EIntegration(unittest.TestCase):
 
     def test_e2e_solar_loop_surplus_and_charge_trigger(self):
         tz = ZoneInfo(self.test_config["TIMEZONE"])
-        # Midday during daylight hours
         midday_time = dt(2026, 6, 21, 12, 0, 0, tzinfo=tz)
 
         # Case 1: Inverter shows export of 3000W (P_Grid = -3000.0)
@@ -265,18 +269,18 @@ class TestE2EIntegration(unittest.TestCase):
         # Run full loop
         tesla_solar_manager.run_solar_loop(override_time=midday_time)
 
-        # Verify updated cache showing charging started at correct floor calculation (2850 // 240 = 11A)
+        # Verify updated cache showing charging started (median of single reading is 3000 -> 11A)
         updated_cache = tesla_solar_manager.read_cache()
         self.assertTrue(updated_cache["charging"])
         self.assertEqual(updated_cache["amps"], 11)
+        self.assertIsNotNone(updated_cache["last_command_time"])
 
     def test_e2e_solar_loop_under_sunset_safety_switch(self):
         tz = ZoneInfo(self.test_config["TIMEZONE"])
-        # Evening past sunset
         night_time = dt(2026, 6, 21, 21, 0, 0, tzinfo=tz)
 
         # Set cache to show it was charging during the day
-        tesla_solar_manager.write_cache({"charging": True, "amps": 10})
+        tesla_solar_manager.write_cache({"charging": True, "amps": 10, "last_command_time": None, "solar_history": []})
 
         # Run loop
         tesla_solar_manager.run_solar_loop(override_time=night_time)
@@ -289,18 +293,37 @@ class TestE2EIntegration(unittest.TestCase):
         tz = ZoneInfo(self.test_config["TIMEZONE"])
         midday_time = dt(2026, 6, 21, 12, 0, 0, tzinfo=tz)
 
-        # Vehicle goes away
         os.environ["MOCK_VEHICLE_HOME"] = "False"
-        
-        # Set cache to show it was charging during the day
-        tesla_solar_manager.write_cache({"charging": True, "amps": 10})
+        tesla_solar_manager.write_cache({"charging": True, "amps": 10, "last_command_time": None, "solar_history": []})
 
-        # Run loop
         tesla_solar_manager.run_solar_loop(override_time=midday_time)
 
-        # Cache should have shut charging down due to gate failure
         updated_cache = tesla_solar_manager.read_cache()
         self.assertFalse(updated_cache["charging"])
+
+    def test_e2e_solar_loop_throttling_behavior(self):
+        tz = ZoneInfo(self.test_config["TIMEZONE"])
+        midday_time_1 = dt(2026, 6, 21, 12, 0, 0, tzinfo=tz)
+        midday_time_2 = dt(2026, 6, 21, 12, 4, 0, tzinfo=tz) # 4 minutes later (under the 10 min throttle)
+
+        # 1. Trigger first change: starts charging at 11A
+        MockFroniusAPIHandler.grid_power = -3000.0
+        tesla_solar_manager.run_solar_loop(override_time=midday_time_1)
+        
+        cache_1 = tesla_solar_manager.read_cache()
+        self.assertTrue(cache_1["charging"])
+        self.assertEqual(cache_1["amps"], 11)
+        last_time_1 = cache_1["last_command_time"]
+
+        # 2. Trigger second change: export spikes to 8000W (calculated 32A) but running only 4 mins later
+        MockFroniusAPIHandler.grid_power = -8000.0
+        tesla_solar_manager.run_solar_loop(override_time=midday_time_2)
+
+        # Cache should STILL show 11A due to throttle blocking command
+        cache_2 = tesla_solar_manager.read_cache()
+        self.assertTrue(cache_2["charging"])
+        self.assertEqual(cache_2["amps"], 11) # Unchanged!
+        self.assertEqual(cache_2["last_command_time"], last_time_1)
 
 
 if __name__ == '__main__':

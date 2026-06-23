@@ -42,18 +42,35 @@ def load_config():
 
 def read_cache():
     """Reads current cache state or returns default if not present."""
+    defaults = {"charging": False, "amps": 5, "last_command_time": None, "solar_history": []}
     if not os.path.exists(CACHE_PATH):
-        return {"charging": False, "amps": 5}
+        return defaults
     with open(CACHE_PATH, "r") as f:
         try:
-            return json.load(f)
+            data = json.load(f)
+            # Merge with defaults to ensure all keys are present
+            for key, val in defaults.items():
+                if key not in data:
+                    data[key] = val
+            return data
         except json.JSONDecodeError:
-            return {"charging": False, "amps": 5}
+            return defaults
 
 def write_cache(state):
     """Writes updated state to local cache file."""
     with open(CACHE_PATH, "w") as f:
         json.dump(state, f, indent=2)
+
+def calculate_median(values):
+    """Calculates the median value of a numerical list."""
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    mid = n // 2
+    if n % 2 != 0:
+        return sorted_vals[mid]
+    return (sorted_vals[mid - 1] + sorted_vals[mid]) / 2.0
 
 def get_daylight_window(config, override_time=None):
     """Calculates sunrise and sunset for the current day."""
@@ -217,6 +234,7 @@ def run_solar_loop(override_time=None, mock_power=None):
             print(f"[{now}] Past sunset. Shutting down charging.")
             if call_tesla_api(config, "charge_stop"):
                 cache["charging"] = False
+                cache["last_command_time"] = now.isoformat()
                 write_cache(cache)
                 print(f"[{now}] Success: Charger safely turned off for the night.")
         else:
@@ -263,6 +281,7 @@ def run_solar_loop(override_time=None, mock_power=None):
             print(f"[{now}] Disabling charging due to gate failure. Sending command /charge_stop to Tesla...")
             if call_tesla_api(config, "charge_stop"):
                 cache["charging"] = False
+                cache["last_command_time"] = now.isoformat()
                 write_cache(cache)
         return
 
@@ -271,34 +290,79 @@ def run_solar_loop(override_time=None, mock_power=None):
     if excess_watts is None:
         return # Skip calculation if telemetry is missing
 
-    target_charging, target_amps = calculate_target_amps(excess_watts, config)
+    # Append to rolling history
+    cache["solar_history"].append({"timestamp": now.isoformat(), "watts": excess_watts})
+    
+    # Filter rolling history to include only elements in the window (window length + 2 min tolerance)
+    cutoff = now - datetime.timedelta(minutes=config.get("HISTORY_WINDOW_MINUTES", 10) + 2)
+    valid_history = []
+    for item in cache["solar_history"]:
+        try:
+            item_time = dt.fromisoformat(item["timestamp"]).astimezone(now.tzinfo)
+            if item_time >= cutoff:
+                valid_history.append(item)
+        except (ValueError, KeyError):
+            pass
+            
+    # Max size cap based on intervals
+    max_size = max(1, config.get("HISTORY_WINDOW_MINUTES", 10) // config.get("POLLING_INTERVAL_MINUTES", 2))
+    valid_history = valid_history[-max_size:]
+    cache["solar_history"] = valid_history
+    write_cache(cache)
+
+    # Compute median surplus
+    watts_list = [item["watts"] for item in valid_history]
+    median_excess = calculate_median(watts_list)
+    print(f"[{now}] Rolling History: {len(valid_history)} readings over last {config.get('HISTORY_WINDOW_MINUTES', 10)} mins. Median = {median_excess:.2f} W. (Readings: {[round(w,1) for w in watts_list]})")
+
+    target_charging, target_amps = calculate_target_amps(median_excess, config)
     current_amps = cache.get("amps", config["MIN_AMPS"])
 
-    # 3. STATE COMPARATIVE TRANSITIONS
+    # 4. STATE COMPARATIVE TRANSITIONS
+    state_changed = (target_charging != current_charging) or (target_charging and target_amps != current_amps)
+    
+    if state_changed:
+        # Check throttling rule (except safety transitions)
+        last_cmd = cache.get("last_command_time")
+        if last_cmd is not None:
+            try:
+                last_cmd_dt = dt.fromisoformat(last_cmd).astimezone(now.tzinfo)
+                time_since_last_cmd = (now - last_cmd_dt).total_seconds() / 60.0
+                throttle_limit = config.get("THROTTLE_INTERVAL_MINUTES", 10)
+                if time_since_last_cmd < throttle_limit:
+                    remaining = throttle_limit - time_since_last_cmd
+                    print(f"[{now}] Throttle Active: Change (Charging: {current_charging}->{target_charging}, Amps: {current_amps}->{target_amps}) throttled. Remaining: {remaining:.1f} mins. Maintaining current state.")
+                    return
+            except Exception:
+                pass
+
     if target_charging:
         if not current_charging:
-            print(f"[{now}] Solar surplus ({excess_watts} W) detected. Starting charge at {target_amps} A. Sending command /charge_start to Tesla...")
+            print(f"[{now}] Solar surplus ({median_excess:.1f} W) detected. Starting charge at {target_amps} A. Sending command /charge_start to Tesla...")
             if call_tesla_api(config, "charge_start"):
                 print(f"[{now}] Sending command /set_charging_amps with payload {{'charging_amps': {target_amps}}} to Tesla...")
                 if call_tesla_api(config, "set_charging_amps", {"charging_amps": target_amps}):
                     cache["charging"] = True
                     cache["amps"] = target_amps
+                    cache["last_command_time"] = now.isoformat()
                     write_cache(cache)
         elif target_amps != current_amps:
             print(f"[{now}] Surplus changed. Adjusting charge: {current_amps} A -> {target_amps} A. Sending command /set_charging_amps to Tesla...")
             if call_tesla_api(config, "set_charging_amps", {"charging_amps": target_amps}):
                 cache["amps"] = target_amps
+                cache["last_command_time"] = now.isoformat()
                 write_cache(cache)
         else:
             print(f"[{now}] In balance. Maintaining {current_amps} A.")
     else:
         if current_charging:
-            print(f"[{now}] Solar surplus dropped to ({excess_watts} W). Stopping charge. Sending command /charge_stop to Tesla...")
+            print(f"[{now}] Solar surplus dropped to ({median_excess:.1f} W). Stopping charge. Sending command /charge_stop to Tesla...")
             if call_tesla_api(config, "charge_stop"):
                 cache["charging"] = False
+                cache["last_command_time"] = now.isoformat()
                 write_cache(cache)
         else:
-            print(f"[{now}] Surplus ({excess_watts} W) insufficient to charge. System idle.")
+            print(f"[{now}] Surplus ({median_excess:.1f} W) insufficient to charge. System idle.")
 
 if __name__ == "__main__":
     run_solar_loop()

@@ -12,10 +12,10 @@ This file defines the system objectives, feature backlog catalog, active technic
 
 ## 🛠️ Technical Approach
 *   **Synology NAS Hosting**: Runs as a scheduled Python job/daemon triggered by DSM Task Scheduler.
-*   **Local Telemetry Ingestion**: Polls the Fronius Datamanager 2.0 via local HTTP API (`GetPowerFlowRealtimeData.fcgi`) every 10 minutes.
-*   **Billing Protection Cache**: Stores current charging state (charging: boolean, amps: int) in local `state_cache.json` to prevent unnecessary calls to the Tesla Fleet API.
+*   **Local Telemetry Ingestion**: Polls the Fronius Datamanager 2.0 via local HTTP API (`GetPowerFlowRealtimeData.fcgi`) every 2 minutes.
+*   **Billing Protection Cache**: Stores current charging state, rolling solar history, and last command execution timestamp in `state_cache.json` to prevent unnecessary calls and enforce a 10-minute command throttle limit.
 *   **Daylight Boundaries**: Restricts active regulation to local sunrise/sunset windows calculated using the `astral` library. Forces charging off at sunset.
-*   **Control Algorithm**: Calculates surplus power dynamically and floors the charging current to standard levels ($5\text{ A}$ to $32\text{ A}$ at $240\text{ V}$) with a safety buffer.
+*   **Control Algorithm**: Calculates surplus power dynamically based on the median of the rolling history, and floors the charging current to standard levels ($5\text{ A}$ to $32\text{ A}$ at $240\text{ V}$) with a safety buffer.
 *   **Mocking Layer**: Mocks the Tesla Fleet API with random but realistic response data for development and dry runs without making real-world vehicle updates.
 
 ---
@@ -30,6 +30,7 @@ This file defines the system objectives, feature backlog catalog, active technic
 | F-004 | Solar Control Logic | Implement excess calculation, voltage-amp conversion, and status checks with caching | **Completed** | Unit tests with various solar and state scenarios |
 | F-005 | Tesla Mock API | Implement a mock Tesla Fleet API client that responds with realistic data and state mutations | **Completed** | Parity check and trace logging in dry-runs |
 | F-007 | Tesla Gating Checks | Verify if the Tesla is at home, plugged in, and not fully charged before regulating charger state | **Completed** | Proximity checks and E2E integration safety disconnect tests |
+| F-008 | Rolling Averages & Throttle | Smooth out solar fluctuations via 10-minute median and throttle cloud requests to 10-minute intervals | **Completed** | Sliding window and throttling integration tests |
 | F-006 | Scheduled Runner | Shell script wrapper for Synology DSM task scheduler execution and logs | Backlog | Manual runner verification |
 
 ---

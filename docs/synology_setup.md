@@ -81,9 +81,7 @@ chmod +x run.sh
 
 ---
 
-## 6. Configure Synology Task Scheduler
-
-Configure the script to run every 10 minutes automatically:
+Configure the script to run every 2 minutes automatically to support the rolling average/median calculation:
 
 1. Open **Control Panel** in DSM and click on **Task Scheduler**.
 2. Select **Create** > **Scheduled Task** > **User-defined script**.
@@ -92,7 +90,7 @@ Configure the script to run every 10 minutes automatically:
    * **User**: `admin` (or the user owning the directory)
 4. **Schedule**:
    * **Run on the following days**: *Daily*
-   * **Frequency**: *Every 10 minutes* (or 5 minutes if you prefer closer regulation)
+   * **Frequency**: *Every 2 minutes* (configure this in the scheduler dropdown to ensure the history logic maintains a high-resolution rolling window)
    * **Active Time**: *06:00 AM to 06:00 PM* (limits processing to daylight hours)
 5. **Task Settings**:
    * Under **Run command**, enter:
