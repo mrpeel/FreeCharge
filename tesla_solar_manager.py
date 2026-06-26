@@ -63,6 +63,9 @@ def load_config():
     config["TESLA_API_BASE_URL"] = os.getenv("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com")
     config["TESLA_VIN"] = os.getenv("TESLA_VIN", "5YJ3XXXXXXXXXXXXX")
     config["TESLA_API_TOKEN"] = os.getenv("TESLA_API_TOKEN", "YOUR_TESLA_API_ACCESS_TOKEN")
+    config["TESLA_REFRESH_TOKEN"] = os.getenv("TESLA_REFRESH_TOKEN", "")
+    config["TESLA_CLIENT_ID"] = os.getenv("TESLA_CLIENT_ID", "")
+    config["TESLA_CLIENT_SECRET"] = os.getenv("TESLA_CLIENT_SECRET", "")
     config["LATITUDE"] = float(os.getenv("LATITUDE", "-33.8688"))
     config["LONGITUDE"] = float(os.getenv("LONGITUDE", "151.2093"))
     
@@ -107,6 +110,75 @@ def write_cache(state):
     """Writes updated state to local cache file."""
     with open(CACHE_PATH, "w") as f:
         json.dump(state, f, indent=2)
+
+def update_env_file(key, value):
+    """Updates or adds a key-value pair in the local .env file."""
+    if not os.path.exists(ENV_PATH):
+        return
+    with open(ENV_PATH, "r") as f:
+        lines = f.readlines()
+        
+    updated = False
+    new_lines = []
+    for line in lines:
+        if line.strip().startswith(f"{key}="):
+            new_lines.append(f"{key}={value}\n")
+            updated = True
+        else:
+            new_lines.append(line)
+            
+    if not updated:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] += "\n"
+        new_lines.append(f"{key}={value}\n")
+        
+    with open(ENV_PATH, "w") as f:
+        f.writelines(new_lines)
+
+def refresh_tesla_token(config):
+    """Refreshes the Tesla OAuth token using the refresh token and writes the new tokens back to .env."""
+    refresh_token = config.get("TESLA_REFRESH_TOKEN")
+    client_id = config.get("TESLA_CLIENT_ID")
+    client_secret = config.get("TESLA_CLIENT_SECRET")
+    
+    if not refresh_token or not client_id or not client_secret:
+        print(f"[{dt.now()}] Cannot refresh Tesla token: TESLA_REFRESH_TOKEN, TESLA_CLIENT_ID, or TESLA_CLIENT_SECRET is missing.")
+        return False
+        
+    print(f"[{dt.now()}] Attempting to refresh Tesla access token...")
+    url = "https://auth.tesla.com/oauth2/v3/token"
+    payload = {
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            new_access_token = data.get("access_token")
+            new_refresh_token = data.get("refresh_token")
+            
+            if not new_access_token or not new_refresh_token:
+                print(f"[{dt.now()}] Token refresh response was missing access_token or refresh_token.")
+                return False
+                
+            config["TESLA_API_TOKEN"] = new_access_token
+            config["TESLA_REFRESH_TOKEN"] = new_refresh_token
+            
+            update_env_file("TESLA_API_TOKEN", new_access_token)
+            update_env_file("TESLA_REFRESH_TOKEN", new_refresh_token)
+            
+            print(f"[{dt.now()}] Tesla token refreshed successfully.")
+            return True
+        else:
+            print(f"[{dt.now()}] Failed to refresh Tesla token. HTTP {response.status_code}: {response.text}")
+            return False
+    except Exception as e:
+        print(f"[{dt.now()}] Error during Tesla token refresh: {e}")
+        return False
 
 def calculate_median(values):
     """Calculates the median value of a numerical list."""
@@ -220,6 +292,11 @@ def get_tesla_vehicle_data(config):
     url = f"{base_url}/api/1/vehicles/{config['TESLA_VIN']}/vehicle_data"
     try:
         response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):
+            print(f"[{dt.now()}] Detected Tesla authentication failure (HTTP {response.status_code}). Attempting token refresh...")
+            if refresh_tesla_token(config):
+                headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
+                response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
             data = response.json().get("response", {})
             drive_state = data.get("drive_state", {})
@@ -269,6 +346,11 @@ def call_tesla_api(config, endpoint, payload=None):
     url = f"{base_url}/api/1/vehicles/{config['TESLA_VIN']}/command/{endpoint}"
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=15)
+        if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):
+            print(f"[{now_str}] Detected Tesla authentication failure (HTTP {response.status_code}) on /{endpoint}. Attempting token refresh...")
+            if refresh_tesla_token(config):
+                headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
+                response = requests.post(url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
             result = response.json().get("response", {}).get("result")
             if result:

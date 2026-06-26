@@ -8,7 +8,7 @@ import http.server
 import threading
 import time
 import socket
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 # Import functions to test
 import tesla_solar_manager
@@ -600,6 +600,62 @@ class TestStateCachingBehavior(unittest.TestCase):
         cache = tesla_solar_manager.read_cache()
         self.assertTrue(cache["charging"])
         self.assertEqual(cache["amps"], 16)
+
+    @patch('tesla_solar_manager.update_env_file')
+    @patch('requests.post')
+    def test_refresh_tesla_token_success(self, mock_post, mock_update_env):
+        # Configure mock response for refresh
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "access_token": "new_access_token_123",
+            "refresh_token": "new_refresh_token_123"
+        }
+        mock_post.return_value = mock_response
+
+        config = {
+            "TESLA_REFRESH_TOKEN": "old_refresh",
+            "TESLA_CLIENT_ID": "client_id",
+            "TESLA_CLIENT_SECRET": "client_secret"
+        }
+
+        success = tesla_solar_manager.refresh_tesla_token(config)
+        self.assertTrue(success)
+        self.assertEqual(config["TESLA_API_TOKEN"], "new_access_token_123")
+        self.assertEqual(config["TESLA_REFRESH_TOKEN"], "new_refresh_token_123")
+        mock_update_env.assert_any_call("TESLA_API_TOKEN", "new_access_token_123")
+        mock_update_env.assert_any_call("TESLA_REFRESH_TOKEN", "new_refresh_token_123")
+
+    @patch('tesla_solar_manager.refresh_tesla_token')
+    @patch('requests.get')
+    def test_get_tesla_vehicle_data_auth_retry(self, mock_get, mock_refresh):
+        # First call returns 401, second call returns 200
+        mock_response_401 = MagicMock()
+        mock_response_401.status_code = 401
+        
+        mock_response_200 = MagicMock()
+        mock_response_200.status_code = 200
+        mock_response_200.json.return_value = {
+            "response": {
+                "drive_state": {"latitude": 10.0, "longitude": 20.0},
+                "charge_state": {"charging_state": "Charging", "battery_level": 80, "charge_limit_soc": 90}
+            }
+        }
+        
+        mock_get.side_effect = [mock_response_401, mock_response_200]
+        mock_refresh.return_value = True
+
+        config = {
+            "TESLA_VIN": "test_vin",
+            "TESLA_API_TOKEN": "expired_token",
+            "MOCK_TESLA": False
+        }
+
+        data = tesla_solar_manager.get_tesla_vehicle_data(config)
+        self.assertIsNotNone(data)
+        self.assertEqual(data["charging_state"], "Charging")
+        self.assertEqual(mock_refresh.call_count, 1)
+        self.assertEqual(mock_get.call_count, 2)
 
 
 if __name__ == '__main__':
