@@ -106,7 +106,10 @@ class TestCacheUtility(unittest.TestCase):
             "charging": True,
             "amps": 16,
             "last_command_time": "2026-06-21T12:00:00",
-            "solar_history": [{"timestamp": "2026-06-21T12:00:00", "watts": 3000}]
+            "solar_history": [{"timestamp": "2026-06-21T12:00:00", "watts": 3000}],
+            "vehicle_state": {},
+            "last_telemetry_check_time": None,
+            "last_sunrise_reset_date": None
         }
         tesla_solar_manager.write_cache(test_state)
         read_state = tesla_solar_manager.read_cache()
@@ -261,6 +264,7 @@ class TestE2EIntegration(unittest.TestCase):
             "FRONIUS_IP": f"127.0.0.1:{self.port}",
             "FRONIUS_EXPORT_IS_POSITIVE": False,
             "TESLA_VIN": "5YJ3TESTINGVIN123",
+            "TESLA_API_BASE_URL": "https://fleet-api.prd.na.vn.cloud.tesla.com",
             "TESLA_API_TOKEN": "mock_token",
             "MOCK_TESLA": True,
             "MOCK_API_FAILURE_RATE": 0.0,
@@ -365,6 +369,237 @@ class TestE2EIntegration(unittest.TestCase):
         self.assertTrue(cache_2["charging"])
         self.assertEqual(cache_2["amps"], 11) # Unchanged!
         self.assertEqual(cache_2["last_command_time"], last_time_1)
+class TestStateCachingBehavior(unittest.TestCase):
+    def setUp(self):
+        self.original_cache_path = tesla_solar_manager.CACHE_PATH
+        tesla_solar_manager.CACHE_PATH = os.path.join(TEST_DIR, "temp_cache_behavior_test.json")
+        if os.path.exists(tesla_solar_manager.CACHE_PATH):
+            os.remove(tesla_solar_manager.CACHE_PATH)
+            
+        self.config_patcher = patch('tesla_solar_manager.load_config')
+        self.mock_load_config = self.config_patcher.start()
+        
+        self.test_config = {
+            "FRONIUS_IP": "127.0.0.1",
+            "FRONIUS_EXPORT_IS_POSITIVE": False,
+            "TESLA_VIN": "mock_vin",
+            "TESLA_API_BASE_URL": "https://fleet-api.prd.na.vn.cloud.tesla.com",
+            "TESLA_API_TOKEN": "mock_token",
+            "MOCK_TESLA": True,
+            "MOCK_API_FAILURE_RATE": 0.0,
+            "LATITUDE": -33.8688,
+            "LONGITUDE": 151.2093,
+            "TIMEZONE": "Australia/Sydney",
+            "CITY_NAME": "Sydney",
+            "VOLTAGE": 240,
+            "MIN_AMPS": 5,
+            "MAX_AMPS": 32,
+            "BUFFER_WATTS": 150,
+            "LOCATION_TOLERANCE": 0.001,
+            "HISTORY_WINDOW_MINUTES": 15,
+            "POLLING_INTERVAL_MINUTES": 5,
+            "THROTTLE_INTERVAL_MINUTES": 10
+        }
+        self.mock_load_config.return_value = self.test_config
+        
+        # Setup clean environment variables
+        os.environ["MOCK_VEHICLE_HOME"] = "True"
+        os.environ["MOCK_VEHICLE_PLUGGED"] = "True"
+        os.environ["MOCK_VEHICLE_SOC"] = "75"
+        os.environ["MOCK_VEHICLE_CHARGE_LIMIT"] = "90"
+
+    def tearDown(self):
+        self.config_patcher.stop()
+        if os.path.exists(tesla_solar_manager.CACHE_PATH):
+            os.remove(tesla_solar_manager.CACHE_PATH)
+        tesla_solar_manager.CACHE_PATH = self.original_cache_path
+        
+        for key in ["MOCK_VEHICLE_HOME", "MOCK_VEHICLE_PLUGGED", "MOCK_VEHICLE_SOC", "MOCK_VEHICLE_CHARGE_LIMIT"]:
+            if key in os.environ:
+                del os.environ[key]
+
+    @patch('tesla_solar_manager.get_tesla_vehicle_data')
+    def test_sunrise_reset(self, mock_get_vehicle_data):
+        tz = ZoneInfo(self.test_config["TIMEZONE"])
+        sunrise_time = dt(2026, 6, 21, 8, 0, 0, tzinfo=tz) # morning (after sunrise)
+        
+        # Initialize cache without sunrise reset date
+        tesla_solar_manager.write_cache({
+            "charging": False,
+            "amps": 5,
+            "vehicle_state": {
+                "latitude": 0.0,
+                "longitude": 0.0,
+                "charging_state": "Disconnected",
+                "battery_level": 40,
+                "charge_limit_soc": 80
+            },
+            "last_sunrise_reset_date": "2026-06-20"
+        })
+        
+        # Run solar loop
+        tesla_solar_manager.run_solar_loop(override_time=sunrise_time, mock_power=-500.0) # insufficient power -> no charge command
+        
+        # Verify that state reset to home coordinates and plugged in (Stopped)
+        cache = tesla_solar_manager.read_cache()
+        self.assertEqual(cache["last_sunrise_reset_date"], "2026-06-21")
+        self.assertEqual(cache["vehicle_state"]["latitude"], self.test_config["LATITUDE"])
+        self.assertEqual(cache["vehicle_state"]["longitude"], self.test_config["LONGITUDE"])
+        self.assertEqual(cache["vehicle_state"]["charging_state"], "Stopped")
+        # Kept the old battery state from cached state
+        self.assertEqual(cache["vehicle_state"]["battery_level"], 40)
+        self.assertEqual(cache["vehicle_state"]["charge_limit_soc"], 80)
+        
+        # Assert no telemetry calls were made (since no target action change occurred)
+        mock_get_vehicle_data.assert_not_called()
+
+    @patch('tesla_solar_manager.get_tesla_vehicle_data')
+    def test_saved_state_insufficient_solar_no_api_calls(self, mock_get_vehicle_data):
+        tz = ZoneInfo(self.test_config["TIMEZONE"])
+        midday_time = dt(2026, 6, 21, 12, 0, 0, tzinfo=tz)
+        
+        # Setup initial cache showing car is home/plugged but currently not charging
+        tesla_solar_manager.write_cache({
+            "charging": False,
+            "amps": 5,
+            "vehicle_state": {
+                "latitude": self.test_config["LATITUDE"],
+                "longitude": self.test_config["LONGITUDE"],
+                "charging_state": "Stopped",
+                "battery_level": 75,
+                "charge_limit_soc": 90
+            },
+            "last_sunrise_reset_date": "2026-06-21"
+        })
+        
+        # Run loop with low power (100W excess) -> calculated state is still not charging -> no change
+        tesla_solar_manager.run_solar_loop(override_time=midday_time, mock_power=-100.0)
+        
+        # Assert no calls to get_tesla_vehicle_data
+        mock_get_vehicle_data.assert_not_called()
+
+    @patch('tesla_solar_manager.get_tesla_vehicle_data')
+    def test_saved_state_triggers_api_call_on_action_change(self, mock_get_vehicle_data):
+        tz = ZoneInfo(self.test_config["TIMEZONE"])
+        midday_time = dt(2026, 6, 21, 12, 0, 0, tzinfo=tz)
+        
+        # Mock telemetry to return home/plugged state
+        mock_get_vehicle_data.return_value = {
+            "latitude": self.test_config["LATITUDE"],
+            "longitude": self.test_config["LONGITUDE"],
+            "charging_state": "Stopped",
+            "battery_level": 75,
+            "charge_limit_soc": 90
+        }
+        
+        # Cache has car home/plugged, not charging
+        tesla_solar_manager.write_cache({
+            "charging": False,
+            "amps": 5,
+            "vehicle_state": {
+                "latitude": self.test_config["LATITUDE"],
+                "longitude": self.test_config["LONGITUDE"],
+                "charging_state": "Stopped",
+                "battery_level": 75,
+                "charge_limit_soc": 90
+            },
+            "last_sunrise_reset_date": "2026-06-21"
+        })
+        
+        # Run loop with high surplus (4000W excess) -> calculated target is to start charging -> indicates a change
+        tesla_solar_manager.run_solar_loop(override_time=midday_time, mock_power=-4000.0)
+        
+        # Assert live telemetry WAS queried to confirm state
+        mock_get_vehicle_data.assert_called_once()
+        
+        cache = tesla_solar_manager.read_cache()
+        self.assertTrue(cache["charging"])
+        self.assertEqual(cache["amps"], 16) # (4000 - 150) // 240 = 16A
+
+    @patch('tesla_solar_manager.get_tesla_vehicle_data')
+    def test_unplugged_telemetry_rate_limit(self, mock_get_vehicle_data):
+        tz = ZoneInfo(self.test_config["TIMEZONE"])
+        time_1 = dt(2026, 6, 21, 12, 0, 0, tzinfo=tz)
+        time_2 = dt(2026, 6, 21, 12, 5, 0, tzinfo=tz) # 5 mins later (under 10 min throttle)
+        time_3 = dt(2026, 6, 21, 12, 11, 0, tzinfo=tz) # 11 mins later (exceeds 10 min throttle)
+        
+        mock_get_vehicle_data.return_value = {
+            "latitude": self.test_config["LATITUDE"],
+            "longitude": self.test_config["LONGITUDE"],
+            "charging_state": "Disconnected",
+            "battery_level": 75,
+            "charge_limit_soc": 90
+        }
+        
+        # Cache shows vehicle is unplugged ("Disconnected")
+        tesla_solar_manager.write_cache({
+            "charging": False,
+            "amps": 5,
+            "vehicle_state": {
+                "latitude": self.test_config["LATITUDE"],
+                "longitude": self.test_config["LONGITUDE"],
+                "charging_state": "Disconnected",
+                "battery_level": 75,
+                "charge_limit_soc": 90
+            },
+            "last_sunrise_reset_date": "2026-06-21",
+            "last_telemetry_check_time": None
+        })
+        
+        # 1. Run at time_1 with high surplus. Throttling is inactive (no last check time). It should query Tesla.
+        tesla_solar_manager.run_solar_loop(override_time=time_1, mock_power=-4000.0)
+        self.assertEqual(mock_get_vehicle_data.call_count, 1)
+        
+        # 2. Run at time_2 with high surplus. Less than 10 mins since last check. It should NOT query Tesla.
+        tesla_solar_manager.run_solar_loop(override_time=time_2, mock_power=-4000.0)
+        self.assertEqual(mock_get_vehicle_data.call_count, 1) # Still 1
+        
+        # 3. Run at time_3 with high surplus. More than 10 mins since last check. It SHOULD query Tesla again.
+        tesla_solar_manager.run_solar_loop(override_time=time_3, mock_power=-4000.0)
+        self.assertEqual(mock_get_vehicle_data.call_count, 2)
+
+    @patch('requests.post')
+    @patch('tesla_solar_manager.get_tesla_vehicle_data')
+    def test_dry_run_command_bypassing(self, mock_get_vehicle_data, mock_post):
+        # Setup config
+        self.test_config["DRY_RUN"] = True
+        self.test_config["MOCK_TESLA"] = False # Real mode
+        
+        # Telemetry is mocked for loop gating
+        mock_get_vehicle_data.return_value = {
+            "latitude": self.test_config["LATITUDE"],
+            "longitude": self.test_config["LONGITUDE"],
+            "charging_state": "Stopped",
+            "battery_level": 75,
+            "charge_limit_soc": 90
+        }
+        
+        # Cache setup
+        tesla_solar_manager.write_cache({
+            "charging": False,
+            "amps": 5,
+            "vehicle_state": {
+                "latitude": self.test_config["LATITUDE"],
+                "longitude": self.test_config["LONGITUDE"],
+                "charging_state": "Stopped",
+                "battery_level": 75,
+                "charge_limit_soc": 90
+            },
+            "last_sunrise_reset_date": "2026-06-21"
+        })
+        
+        # Run loop with high power (charging start change indicated)
+        tz = ZoneInfo(self.test_config["TIMEZONE"])
+        midday_time = dt(2026, 6, 21, 12, 0, 0, tzinfo=tz)
+        tesla_solar_manager.run_solar_loop(override_time=midday_time, mock_power=-4000.0)
+        
+        # Verify that requests.post was NOT called because DRY_RUN is active
+        mock_post.assert_not_called()
+        
+        # Verify that the cache still registers charging=True since the command was successfully simulated
+        cache = tesla_solar_manager.read_cache()
+        self.assertTrue(cache["charging"])
+        self.assertEqual(cache["amps"], 16)
 
 
 if __name__ == '__main__':
