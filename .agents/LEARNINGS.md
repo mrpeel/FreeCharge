@@ -20,4 +20,8 @@ This document captures resolved bugs, architectural changes, key logical finding
    - **Context**: Access tokens expire after 8 hours, causing `401` authentication errors.
    - **Decision**: Added `offline_access` to authorization scopes, implemented a token refresh handler that POSTs to `https://auth.tesla.com/oauth2/v3/token` when a request fails with `401`, and rewrites the updated `TESLA_API_TOKEN` and `TESLA_REFRESH_TOKEN` directly back to `.env` to sustain runs indefinitely.
 
+4. **Tesla Vehicle Wake-Up Integration (June 27, 2026)**:
+   - **Context**: When the vehicle goes offline or asleep, `/vehicle_data` queries fail with `vehicle unavailable: vehicle is offline or asleep`, causing the solar tracker control loop to abort regulation updates.
+   - **Decision**: Implemented `wake_up_vehicle(config)` which sends a `POST /wake_up` command to the vehicle, handling potential token refreshes. It polls the vehicle status in a loop (up to 10 attempts, 5 seconds apart) until the state is `online`. Integrated this routine directly inside `get_tesla_vehicle_data` to automatically resolve offline states before retrying telemetry fetches.
+
 
