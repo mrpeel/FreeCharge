@@ -12,6 +12,8 @@ state_cache.json
 # Execution logs
 execution.log
 *.log
+logs/
+tests/temp_test_logs
 
 # System/IDE files
 .DS_Store
