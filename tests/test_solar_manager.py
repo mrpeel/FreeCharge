@@ -657,6 +657,82 @@ class TestStateCachingBehavior(unittest.TestCase):
         self.assertEqual(mock_refresh.call_count, 1)
         self.assertEqual(mock_get.call_count, 2)
 
+    @patch('requests.post')
+    def test_wake_up_vehicle_success(self, mock_post):
+        # First call: state = waking, second call: state = online
+        mock_resp_1 = MagicMock()
+        mock_resp_1.status_code = 200
+        mock_resp_1.json.return_value = {"response": {"state": "waking"}}
+        
+        mock_resp_2 = MagicMock()
+        mock_resp_2.status_code = 200
+        mock_resp_2.json.return_value = {"response": {"state": "online"}}
+        
+        mock_post.side_effect = [mock_resp_1, mock_resp_2]
+        
+        config = {
+            "TESLA_VIN": "test_vin",
+            "TESLA_API_TOKEN": "token",
+            "TESLA_API_BASE_URL": "https://fleet-api.prd.na.vn.cloud.tesla.com"
+        }
+        
+        success = tesla_solar_manager.wake_up_vehicle(config, max_attempts=5, delay_seconds=0.01)
+        self.assertTrue(success)
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch('requests.post')
+    def test_wake_up_vehicle_failure(self, mock_post):
+        # All calls return offline
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"response": {"state": "offline"}}
+        mock_post.return_value = mock_resp
+        
+        config = {
+            "TESLA_VIN": "test_vin",
+            "TESLA_API_TOKEN": "token",
+            "TESLA_API_BASE_URL": "https://fleet-api.prd.na.vn.cloud.tesla.com"
+        }
+        
+        success = tesla_solar_manager.wake_up_vehicle(config, max_attempts=3, delay_seconds=0.01)
+        self.assertFalse(success)
+        self.assertEqual(mock_post.call_count, 3)
+
+    @patch('tesla_solar_manager.wake_up_vehicle')
+    @patch('requests.get')
+    def test_get_tesla_vehicle_data_with_wake_up_success(self, mock_get, mock_wake):
+        # Initial get: 408 (offline)
+        mock_resp_offline = MagicMock()
+        mock_resp_offline.status_code = 408
+        mock_resp_offline.text = '{"error":"vehicle unavailable: vehicle is offline or asleep"}'
+        mock_resp_offline.json.return_value = {"error": "vehicle unavailable: vehicle is offline or asleep"}
+        
+        # Second get (after wake up): 200 (success)
+        mock_resp_success = MagicMock()
+        mock_resp_success.status_code = 200
+        mock_resp_success.json.return_value = {
+            "response": {
+                "drive_state": {"latitude": 10.0, "longitude": 20.0},
+                "charge_state": {"charging_state": "Stopped", "battery_level": 80, "charge_limit_soc": 90}
+            }
+        }
+        
+        mock_get.side_effect = [mock_resp_offline, mock_resp_success]
+        mock_wake.return_value = True
+        
+        config = {
+            "TESLA_VIN": "test_vin",
+            "TESLA_API_TOKEN": "token",
+            "TESLA_API_BASE_URL": "https://fleet-api.prd.na.vn.cloud.tesla.com",
+            "MOCK_TESLA": False
+        }
+        
+        data = tesla_solar_manager.get_tesla_vehicle_data(config)
+        self.assertIsNotNone(data)
+        self.assertEqual(data["charging_state"], "Stopped")
+        mock_wake.assert_called_once()
+        self.assertEqual(mock_get.call_count, 2)
+
 
 if __name__ == '__main__':
     unittest.main()

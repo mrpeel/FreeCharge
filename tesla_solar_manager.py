@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import datetime
 from datetime import datetime as dt, timezone
 import random
@@ -180,6 +181,45 @@ def refresh_tesla_token(config):
         print(f"[{dt.now()}] Error during Tesla token refresh: {e}")
         return False
 
+def wake_up_vehicle(config, max_attempts=10, delay_seconds=5):
+    """Sends wake_up command and polls until the vehicle state is 'online'."""
+    headers = {
+        "Authorization": f"Bearer {config['TESLA_API_TOKEN']}",
+        "Content-Type": "application/json"
+    }
+    base_url = config.get("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com").rstrip("/")
+    url = f"{base_url}/api/1/vehicles/{config['TESLA_VIN']}/wake_up"
+    
+    print(f"[{dt.now()}] Vehicle is asleep or offline. Sending wake_up command...")
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.post(url, headers=headers, timeout=15)
+            # Handle token refresh on 401
+            if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):
+                print(f"[{dt.now()}] Detected Tesla authentication failure on wake_up (HTTP {response.status_code}). Attempting token refresh...")
+                if refresh_tesla_token(config):
+                    headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
+                    response = requests.post(url, headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                state_data = response.json().get("response", {})
+                state = state_data.get("state")
+                print(f"[{dt.now()}] wake_up attempt {attempt}/{max_attempts}: Vehicle state is '{state}'")
+                if state == "online":
+                    print(f"[{dt.now()}] Vehicle is online and awake.")
+                    return True
+            else:
+                print(f"[{dt.now()}] wake_up attempt {attempt}/{max_attempts} failed. HTTP {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"[{dt.now()}] error during wake_up attempt {attempt}: {e}")
+            
+        if attempt < max_attempts:
+            time.sleep(delay_seconds)
+            
+    print(f"[{dt.now()}] Timed out waiting for vehicle to wake up.")
+    return False
+
 def calculate_median(values):
     """Calculates the median value of a numerical list."""
     if not values:
@@ -297,6 +337,30 @@ def get_tesla_vehicle_data(config):
             if refresh_tesla_token(config):
                 headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
                 response = requests.get(url, headers=headers, timeout=15)
+        
+        # Check if vehicle is offline or asleep
+        is_asleep = False
+        if response.status_code != 200:
+            try:
+                err_data = response.json()
+                err_msg = err_data.get("error", "")
+                if "offline" in err_msg or "asleep" in err_msg:
+                    is_asleep = True
+            except Exception:
+                if "offline" in response.text or "asleep" in response.text:
+                    is_asleep = True
+                    
+        if is_asleep:
+            if wake_up_vehicle(config):
+                # Update header in case token refreshed during wake_up
+                headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
+                response = requests.get(url, headers=headers, timeout=15)
+                if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):
+                    print(f"[{dt.now()}] Detected Tesla authentication failure after wake_up (HTTP {response.status_code}). Attempting token refresh...")
+                    if refresh_tesla_token(config):
+                        headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
+                        response = requests.get(url, headers=headers, timeout=15)
+
         if response.status_code == 200:
             data = response.json().get("response", {})
             drive_state = data.get("drive_state", {})
