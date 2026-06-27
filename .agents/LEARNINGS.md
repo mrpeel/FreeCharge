@@ -24,4 +24,8 @@ This document captures resolved bugs, architectural changes, key logical finding
    - **Context**: When the vehicle goes offline or asleep, `/vehicle_data` queries fail with `vehicle unavailable: vehicle is offline or asleep`, causing the solar tracker control loop to abort regulation updates.
    - **Decision**: Implemented `wake_up_vehicle(config)` which sends a `POST /wake_up` command to the vehicle, handling potential token refreshes. It polls the vehicle status in a loop (up to 10 attempts, 5 seconds apart) until the state is `online`. Integrated this routine directly inside `get_tesla_vehicle_data` to automatically resolve offline states before retrying telemetry fetches.
 
+5. **Single-File Codebase Structure Decision (June 27, 2026)**:
+   - **Context**: Codebase length grew to over 600 lines, prompting a design review on modularity vs. deployability.
+   - **Decision**: Decided to maintain the single-file layout to avoid import resolution and environment setup complexity on the Synology NAS. Maintaining a single file ensures seamless execution directly via Synology Task Scheduler and the simple shell runner without managing modular Python package paths.
+
 
