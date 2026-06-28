@@ -339,7 +339,7 @@ def get_tesla_vehicle_data(config):
         "Content-Type": "application/json"
     }
     base_url = config.get("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com").rstrip("/")
-    url = f"{base_url}/api/1/vehicles/{config['TESLA_VIN']}/vehicle_data"
+    url = f"{base_url}/api/1/vehicles/{config['TESLA_VIN']}/vehicle_data?endpoints=location_data%3Bcharge_state%3Bdrive_state%3Bvehicle_state"
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):

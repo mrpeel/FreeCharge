@@ -656,6 +656,11 @@ class TestStateCachingBehavior(unittest.TestCase):
         self.assertEqual(data["charging_state"], "Charging")
         self.assertEqual(mock_refresh.call_count, 1)
         self.assertEqual(mock_get.call_count, 2)
+        mock_get.assert_any_call(
+            "https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/vehicles/test_vin/vehicle_data?endpoints=location_data%3Bcharge_state%3Bdrive_state%3Bvehicle_state",
+            headers=unittest.mock.ANY,
+            timeout=15
+        )
 
     @patch('requests.post')
     def test_wake_up_vehicle_success(self, mock_post):
@@ -732,6 +737,11 @@ class TestStateCachingBehavior(unittest.TestCase):
         self.assertEqual(data["charging_state"], "Stopped")
         mock_wake.assert_called_once()
         self.assertEqual(mock_get.call_count, 2)
+        mock_get.assert_any_call(
+            "https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/vehicles/test_vin/vehicle_data?endpoints=location_data%3Bcharge_state%3Bdrive_state%3Bvehicle_state",
+            headers=unittest.mock.ANY,
+            timeout=15
+        )
 
     @patch('tesla_solar_manager.print')
     def test_is_vehicle_at_home_diagnostics(self, mock_print):
