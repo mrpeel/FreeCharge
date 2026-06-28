@@ -28,4 +28,8 @@ This document captures resolved bugs, architectural changes, key logical finding
    - **Context**: Codebase length grew to over 600 lines, prompting a design review on modularity vs. deployability.
    - **Decision**: Decided to maintain the single-file layout to avoid import resolution and environment setup complexity on the Synology NAS. Maintaining a single file ensures seamless execution directly via Synology Task Scheduler and the simple shell runner without managing modular Python package paths.
 
+6. **Location Proximity Diagnostics & 1-Hour Full Charge Throttling (June 28, 2026)**:
+   - **Context**: Inaccurate proximity matches resulted in false "not at home" gating failures. Additionally, if the vehicle was full, checking telemetry every 10 minutes needlessly woke up the vehicle.
+   - **Decision**: (1) Upgraded `is_vehicle_at_home` to calculate and log the exact vehicle/home coordinates and estimated distance in meters on failure. (2) Configured the offline/away telemetry check throttle to automatically increase from 10 minutes to 60 minutes if the car is fully charged (`is_full` is True).
+
 
