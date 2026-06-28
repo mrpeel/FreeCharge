@@ -292,7 +292,17 @@ def get_excess_solar(config, mock_power=None):
 
 def is_vehicle_at_home(vehicle_lat, vehicle_lon, home_lat, home_lon, tolerance=0.001):
     """Checks if the vehicle is close to home coordinates."""
-    return abs(vehicle_lat - home_lat) < tolerance and abs(vehicle_lon - home_lon) < tolerance
+    lat_diff = abs(vehicle_lat - home_lat)
+    lon_diff = abs(vehicle_lon - home_lon)
+    at_home = lat_diff < tolerance and lon_diff < tolerance
+    if not at_home:
+        import math
+        # 1 deg lat is ~111,139 meters. 1 deg lon is ~111,139 meters * cos(lat)
+        lat_dist = lat_diff * 111139.0
+        lon_dist = lon_diff * 111139.0 * math.cos(math.radians(home_lat))
+        distance_meters = math.sqrt(lat_dist**2 + lon_dist**2)
+        print(f"[{dt.now()}] Vehicle Proximity Check Failed: Vehicle ({vehicle_lat:.6f}, {vehicle_lon:.6f}), Home ({home_lat:.6f}, {home_lon:.6f}), Diff ({lat_diff:.6f}, {lon_diff:.6f}), Est. Distance: {distance_meters:.1f} meters (Tolerance: {tolerance} deg, ~{tolerance * 111139.0:.0f}m)")
+    return at_home
 
 def get_tesla_vehicle_data(config):
     """Fetches real vehicle data or returns mock data depending on configuration."""
@@ -541,14 +551,17 @@ def run_solar_loop(override_time=None, mock_power=None):
     current_charging = cache.get("charging", False)
     current_amps = cache.get("amps", config["MIN_AMPS"])
 
-    # Nuance: if saved state is offline/away but surplus says to charge, check live state (at most once every 10 min)
+    # Nuance: if saved state is offline/away but surplus says to charge, check live state (at most once every 10 min, or 60 min if full)
     if (not is_home or not is_plugged) and target_charging:
         last_check_str = cache.get("last_telemetry_check_time")
         can_check = True
+        throttle_limit = 60.0 if is_full else 10.0
+        time_since_last_check = 0.0
         if last_check_str:
             try:
                 last_check_dt = dt.fromisoformat(last_check_str).astimezone(now.tzinfo)
-                if (now - last_check_dt).total_seconds() / 60.0 < 10.0:
+                time_since_last_check = (now - last_check_dt).total_seconds() / 60.0
+                if time_since_last_check < throttle_limit:
                     can_check = False
             except Exception:
                 pass
@@ -576,7 +589,7 @@ def run_solar_loop(override_time=None, mock_power=None):
             else:
                 print(f"[{now}] Failed to fetch live Tesla telemetry. Proceeding with saved offline state.")
         else:
-            remaining = 10.0 - ((now - last_check_dt).total_seconds() / 60.0)
+            remaining = throttle_limit - time_since_last_check
             print(f"[{now}] Saved state is offline/away. Surplus indicates charge possible, but live API query throttled. Remaining: {remaining:.1f} mins. System idle.")
             return
 

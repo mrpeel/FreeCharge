@@ -733,6 +733,71 @@ class TestStateCachingBehavior(unittest.TestCase):
         mock_wake.assert_called_once()
         self.assertEqual(mock_get.call_count, 2)
 
+    @patch('tesla_solar_manager.print')
+    def test_is_vehicle_at_home_diagnostics(self, mock_print):
+        home_lat = -33.8688
+        home_lon = 151.2093
+        tolerance = 0.001
+        
+        # Vehicle is away
+        at_home = tesla_solar_manager.is_vehicle_at_home(
+            -33.9000, 151.2000, home_lat, home_lon, tolerance
+        )
+        self.assertFalse(at_home)
+        # Ensure print was called with proximity failure message
+        mock_print.assert_called_once()
+        print_arg = mock_print.call_args[0][0]
+        self.assertIn("Vehicle Proximity Check Failed", print_arg)
+        self.assertIn("Est. Distance", print_arg)
+
+    @patch('tesla_solar_manager.get_tesla_vehicle_data')
+    def test_unplugged_telemetry_rate_limit_when_full(self, mock_get_vehicle_data):
+        tz = ZoneInfo(self.test_config["TIMEZONE"])
+        time_1 = dt(2026, 6, 21, 12, 0, 0, tzinfo=tz)
+        time_2 = dt(2026, 6, 21, 12, 30, 0, tzinfo=tz) # 30 mins later (under 60 min throttle)
+        time_3 = dt(2026, 6, 21, 13, 1, 0, tzinfo=tz) # 61 mins later (exceeds 60 min throttle)
+        
+        mock_get_vehicle_data.return_value = {
+            "latitude": self.test_config["LATITUDE"],
+            "longitude": self.test_config["LONGITUDE"],
+            "charging_state": "Disconnected",
+            "battery_level": 90,
+            "charge_limit_soc": 90
+        }
+        
+        # Cache shows vehicle is unplugged ("Disconnected") and full
+        tesla_solar_manager.write_cache({
+            "charging": False,
+            "amps": 5,
+            "vehicle_state": {
+                "latitude": self.test_config["LATITUDE"],
+                "longitude": self.test_config["LONGITUDE"],
+                "charging_state": "Disconnected",
+                "battery_level": 90,
+                "charge_limit_soc": 90
+            },
+            "last_sunrise_reset_date": "2026-06-21",
+            "last_telemetry_check_time": None
+        })
+        
+        # 1. Run at time_1 with high surplus. Throttling is inactive. It should query Tesla.
+        tesla_solar_manager.run_solar_loop(override_time=time_1, mock_power=-4000.0)
+        self.assertEqual(mock_get_vehicle_data.call_count, 1)
+        
+        # Update cache to show vehicle state returned full
+        cache = tesla_solar_manager.read_cache()
+        cache["vehicle_state"]["battery_level"] = 90
+        cache["vehicle_state"]["charge_limit_soc"] = 90
+        tesla_solar_manager.write_cache(cache)
+        
+        # 2. Run at time_2 with high surplus. 30 mins since last check. Full car -> Throttled. It should NOT query Tesla.
+        tesla_solar_manager.run_solar_loop(override_time=time_2, mock_power=-4000.0)
+        self.assertEqual(mock_get_vehicle_data.call_count, 1) # Still 1
+        
+        # 3. Run at time_3 with high surplus. 61 mins since last check. Exceeds 60 min throttle -> It SHOULD query Tesla.
+        tesla_solar_manager.run_solar_loop(override_time=time_3, mock_power=-4000.0)
+        self.assertEqual(mock_get_vehicle_data.call_count, 2)
+
 
 if __name__ == '__main__':
     unittest.main()
