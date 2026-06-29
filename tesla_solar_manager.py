@@ -517,6 +517,8 @@ def run_solar_loop(override_time=None, mock_power=None):
         }
         write_cache(cache)
 
+    telemetry_fetched_this_loop = False
+
     # 2. SAVED STATE EVALUATION
     saved_state = cache["vehicle_state"]
     is_home = is_vehicle_at_home(
@@ -565,25 +567,31 @@ def run_solar_loop(override_time=None, mock_power=None):
     current_charging = cache.get("charging", False)
     current_amps = cache.get("amps", config["MIN_AMPS"])
 
-    # Nuance: if saved state is offline/away but surplus says to charge, check live state (at most once every 10 min, or 60 min if full)
-    if (not is_home or not is_plugged) and target_charging:
+    # 3. PROACTIVE TELEMETRY REFRESH
+    # If we are currently charging, or if the surplus suggests we should charge,
+    # we need up-to-date telemetry. We refresh if the cache is stale.
+    if current_charging or target_charging:
         last_check_str = cache.get("last_telemetry_check_time")
-        can_check = True
-        throttle_limit = 60.0 if is_full else 10.0
+        should_refresh = False
+        refresh_interval = 60.0 if is_full else 10.0
         time_since_last_check = 0.0
+        
         if last_check_str:
             try:
                 last_check_dt = dt.fromisoformat(last_check_str).astimezone(now.tzinfo)
                 time_since_last_check = (now - last_check_dt).total_seconds() / 60.0
-                if time_since_last_check < throttle_limit:
-                    can_check = False
+                if time_since_last_check >= refresh_interval:
+                    should_refresh = True
             except Exception:
-                pass
-        
-        if can_check:
-            print(f"[{now}] Saved state is offline/away, but surplus indicates start charge. Checking live Tesla telemetry...")
+                should_refresh = True
+        else:
+            should_refresh = True
+            
+        if should_refresh:
+            print(f"[{now}] Cached telemetry is stale (older than {refresh_interval} mins). Querying live Tesla telemetry...")
             live_data = get_tesla_vehicle_data(config)
             if live_data is not None:
+                telemetry_fetched_this_loop = True
                 cache["last_telemetry_check_time"] = now.isoformat()
                 cache["vehicle_state"] = live_data
                 write_cache(cache)
@@ -601,11 +609,7 @@ def run_solar_loop(override_time=None, mock_power=None):
                 charge_limit = saved_state.get("charge_limit_soc", 100)
                 is_full = soc >= charge_limit
             else:
-                print(f"[{now}] Failed to fetch live Tesla telemetry. Proceeding with saved offline state.")
-        else:
-            remaining = throttle_limit - time_since_last_check
-            print(f"[{now}] Saved state is offline/away. Surplus indicates charge possible, but live API query throttled. Remaining: {remaining:.1f} mins. System idle.")
-            return
+                print(f"[{now}] Failed to fetch live Tesla telemetry. Proceeding with saved cached state.")
 
     # Check Gating criteria
     if not is_home or not is_plugged or is_full:
@@ -617,7 +621,20 @@ def run_solar_loop(override_time=None, mock_power=None):
         if is_full:
             reason.append(f"vehicle charged to limit ({soc}% >= {charge_limit}%)")
             
-        print(f"[{now}] Gating criteria failed: {', '.join(reason)}. System idle.")
+        throttle_info = ""
+        last_check_str = cache.get("last_telemetry_check_time")
+        if last_check_str:
+            try:
+                last_check_dt = dt.fromisoformat(last_check_str).astimezone(now.tzinfo)
+                elapsed = (now - last_check_dt).total_seconds() / 60.0
+                refresh_interval = 60.0 if is_full else 10.0
+                if elapsed < refresh_interval:
+                    remaining = refresh_interval - elapsed
+                    throttle_info = f" (Telemetry query throttled. Remaining: {remaining:.1f} mins)"
+            except Exception:
+                pass
+                
+        print(f"[{now}] Gating criteria failed: {', '.join(reason)}.{throttle_info} System idle.")
         
         # Turn off charging if cached state indicates we were charging
         if current_charging:
@@ -633,16 +650,19 @@ def run_solar_loop(override_time=None, mock_power=None):
     state_changed = (target_charging != current_charging) or (target_charging and target_amps != current_amps)
     
     if state_changed:
-        print(f"[{now}] Calculated action indicates a change (Charging: {current_charging}->{target_charging}, Amps: {current_amps}->{target_amps}). Confirming saved state with live Tesla telemetry...")
-        live_data = get_tesla_vehicle_data(config)
-        if live_data is None:
-            print(f"[{now}] Failed to fetch live Tesla telemetry. Aborting state change.")
-            return
-            
-        cache["last_telemetry_check_time"] = now.isoformat()
-        cache["vehicle_state"] = live_data
-        write_cache(cache)
-        saved_state = live_data
+        if telemetry_fetched_this_loop:
+            live_data = saved_state
+        else:
+            print(f"[{now}] Calculated action indicates a change (Charging: {current_charging}->{target_charging}, Amps: {current_amps}->{target_amps}). Confirming saved state with live Tesla telemetry...")
+            live_data = get_tesla_vehicle_data(config)
+            if live_data is None:
+                print(f"[{now}] Failed to fetch live Tesla telemetry. Aborting state change.")
+                return
+                
+            cache["last_telemetry_check_time"] = now.isoformat()
+            cache["vehicle_state"] = live_data
+            write_cache(cache)
+            saved_state = live_data
 
         # Recalculate gating rules on live data
         is_home = is_vehicle_at_home(
