@@ -21,10 +21,6 @@ LOGS_DIR = os.path.join(BASE_DIR, "logs")
 def custom_print(*args, **kwargs):
     message = " ".join(str(arg) for arg in args)
     
-    # Write to actual stdout terminal
-    import sys
-    sys.__stdout__.write(message + "\n")
-    
     # Write to daily log
     try:
         os.makedirs(LOGS_DIR, exist_ok=True)
@@ -37,6 +33,24 @@ def custom_print(*args, **kwargs):
         now = dt.now(local_tz)
     except Exception:
         now = dt.now()
+
+    # Standardize timezones in the message prefix if it has a naive timestamp
+    import re
+    match = re.match(r"^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]", message)
+    if match:
+        offset = now.strftime("%z") if hasattr(now, "tzinfo") and now.tzinfo else ""
+        if len(offset) == 5:
+            offset_formatted = f"{offset[:3]}:{offset[3:]}"
+        elif len(offset) == 6:
+            offset_formatted = offset
+        else:
+            offset_formatted = ""
+        ts_content = match.group(1)
+        message = f"[{ts_content}{offset_formatted}]" + message[match.end():]
+    
+    # Write to actual stdout terminal
+    import sys
+    sys.__stdout__.write(message + "\n")
         
     log_file = os.path.join(LOGS_DIR, f"execution_{now.strftime('%Y%m%d')}.log")
     try:
