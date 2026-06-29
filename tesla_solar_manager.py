@@ -44,9 +44,9 @@ def custom_print(*args, **kwargs):
             if message.startswith("[202") or message.startswith("["):
                 f.write(message + "\n")
             else:
-                f.write(f"[{dt.now()}] {message}\n")
+                f.write(f"[{now}] {message}\n")
     except Exception as e:
-        sys.__stdout__.write(f"[{dt.now()}] Logging write error: {e}\n")
+        sys.__stdout__.write(f"[{now}] Logging write error: {e}\n")
 
 # Override built-in print globally
 print = custom_print
