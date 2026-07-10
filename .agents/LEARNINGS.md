@@ -32,4 +32,6 @@ This document captures resolved bugs, architectural changes, key logical finding
    - **Context**: Inaccurate proximity matches resulted in false "not at home" gating failures. Additionally, if the vehicle was full, checking telemetry every 10 minutes needlessly woke up the vehicle.
    - **Decision**: (1) Upgraded `is_vehicle_at_home` to calculate and log the exact vehicle/home coordinates and estimated distance in meters on failure. (2) Configured the offline/away telemetry check throttle to automatically increase from 10 minutes to 60 minutes if the car is fully charged (`is_full` is True).
 
-
+7. **Telemetry Deadlock Resolution (July 10, 2026)**:
+   - **Context**: When the car was plugged in and charging outside FreeCharge's active regulation, it drew massive power, causing a negative surplus. Since we only refreshed telemetry when charging or when surplus was positive, the cache kept showing "Disconnected", keeping the system idle.
+   - **Decision**: Configured the telemetry refresh to check unconditionally when stale (every 10 or 60 minutes), but passed `allow_wake_up=False` to `get_tesla_vehicle_data` if not actively charging or attempting to charge. This checks the API status without waking the vehicle from sleep, but successfully syncs the charging state and updates check times if the car is already online/charging.

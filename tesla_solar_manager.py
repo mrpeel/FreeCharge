@@ -318,7 +318,7 @@ def is_vehicle_at_home(vehicle_lat, vehicle_lon, home_lat, home_lon, tolerance=0
         print(f"[{dt.now()}] Vehicle Proximity Check Failed: Vehicle ({vehicle_lat:.6f}, {vehicle_lon:.6f}), Home ({home_lat:.6f}, {home_lon:.6f}), Diff ({lat_diff:.6f}, {lon_diff:.6f}), Est. Distance: {distance_meters:.1f} meters (Tolerance: {tolerance} deg, ~{tolerance * 111139.0:.0f}m)")
     return at_home
 
-def get_tesla_vehicle_data(config):
+def get_tesla_vehicle_data(config, allow_wake_up=True):
     """Fetches real vehicle data or returns mock data depending on configuration."""
     if config["MOCK_TESLA"]:
         # Load mock values from environment or set defaults
@@ -375,6 +375,9 @@ def get_tesla_vehicle_data(config):
                     is_asleep = True
                     
         if is_asleep:
+            if not allow_wake_up:
+                print(f"[{dt.now()}] Vehicle is asleep/offline and allow_wake_up is False. Skipping wake-up.")
+                return {"asleep": True}
             if wake_up_vehicle(config):
                 # Update header in case token refreshed during wake_up
                 headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
@@ -568,32 +571,49 @@ def run_solar_loop(override_time=None, mock_power=None):
     current_amps = cache.get("amps", config["MIN_AMPS"])
 
     # 3. PROACTIVE TELEMETRY REFRESH
-    # If we are currently charging, or if the surplus suggests we should charge,
-    # we need up-to-date telemetry. We refresh if the cache is stale.
-    if current_charging or target_charging:
-        last_check_str = cache.get("last_telemetry_check_time")
-        should_refresh = False
-        refresh_interval = 60.0 if is_full else 10.0
-        time_since_last_check = 0.0
-        
-        if last_check_str:
-            try:
-                last_check_dt = dt.fromisoformat(last_check_str).astimezone(now.tzinfo)
-                time_since_last_check = (now - last_check_dt).total_seconds() / 60.0
-                if time_since_last_check >= refresh_interval:
-                    should_refresh = True
-            except Exception:
+    # We refresh if the cache is stale.
+    last_check_str = cache.get("last_telemetry_check_time")
+    should_refresh = False
+    refresh_interval = 60.0 if is_full else 10.0
+    time_since_last_check = 0.0
+    
+    if last_check_str:
+        try:
+            last_check_dt = dt.fromisoformat(last_check_str).astimezone(now.tzinfo)
+            time_since_last_check = (now - last_check_dt).total_seconds() / 60.0
+            if time_since_last_check >= refresh_interval:
                 should_refresh = True
-        else:
+        except Exception:
             should_refresh = True
+    else:
+        should_refresh = True
+        
+    if should_refresh:
+        allow_wake_up = current_charging or target_charging
+        print(f"[{now}] Cached telemetry is stale (older than {refresh_interval} mins). Querying live Tesla telemetry (allow_wake_up={allow_wake_up})...")
+        live_data = get_tesla_vehicle_data(config, allow_wake_up=allow_wake_up)
+        
+        if live_data is not None:
+            telemetry_fetched_this_loop = True
+            cache["last_telemetry_check_time"] = now.isoformat()
             
-        if should_refresh:
-            print(f"[{now}] Cached telemetry is stale (older than {refresh_interval} mins). Querying live Tesla telemetry...")
-            live_data = get_tesla_vehicle_data(config)
-            if live_data is not None:
-                telemetry_fetched_this_loop = True
-                cache["last_telemetry_check_time"] = now.isoformat()
+            if "asleep" in live_data:
+                print(f"[{now}] Vehicle is asleep. Keeping existing cached vehicle state.")
+                write_cache(cache)
+            else:
                 cache["vehicle_state"] = live_data
+                # Align cache charging status with live state
+                if live_data.get("charging_state") in ("Charging", "Starting"):
+                    if not cache.get("charging", False):
+                        print(f"[{now}] Live telemetry indicates vehicle is actively charging. Syncing cache charging state to True.")
+                    cache["charging"] = True
+                    current_charging = True
+                elif live_data.get("charging_state") in ("Stopped", "Disconnected", "Complete"):
+                    if cache.get("charging", False):
+                        print(f"[{now}] Live telemetry indicates vehicle is not charging. Syncing cache charging state to False.")
+                    cache["charging"] = False
+                    current_charging = False
+                
                 write_cache(cache)
                 saved_state = live_data
                 # Update gating check variables
@@ -608,8 +628,8 @@ def run_solar_loop(override_time=None, mock_power=None):
                 soc = saved_state["battery_level"]
                 charge_limit = saved_state.get("charge_limit_soc", 100)
                 is_full = soc >= charge_limit
-            else:
-                print(f"[{now}] Failed to fetch live Tesla telemetry. Proceeding with saved cached state.")
+        else:
+            print(f"[{now}] Failed to fetch live Tesla telemetry. Proceeding with saved cached state.")
 
     # Check Gating criteria
     if not is_home or not is_plugged or is_full:
