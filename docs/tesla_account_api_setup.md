@@ -136,3 +136,11 @@ Because you are configuring a personal automation task, you do not need a web se
      }'
    ```
 6. Paste the returned `access_token` into your Synology `.env` file under `TESLA_API_TOKEN`.
+
+---
+
+## 6. How Command Signing Works (No Proxy Required)
+The FreeCharge script utilizes the `tesla-fleet-api` library to sign commands natively in pure Python:
+* **Private Key Placement**: Ensure that the `tesla_private_key.pem` generated in **Section 4, Step 2** is placed in the exact same directory as `tesla_solar_manager.py` on your Synology NAS.
+* **No Sidecars**: Cryptographic command signatures (NIST P-256 / secp256r1 curve) are computed in-memory when the control loop initiates charge adjustments. You do not need to configure Nginx, run Docker containers, or run a local Go proxy.
+

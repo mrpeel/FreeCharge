@@ -354,56 +354,65 @@ def get_tesla_vehicle_data(config, allow_wake_up=True):
     }
     base_url = config.get("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com").rstrip("/")
     url = f"{base_url}/api/1/vehicles/{config['TESLA_VIN']}/vehicle_data?endpoints=location_data%3Bcharge_state%3Bdrive_state%3Bvehicle_state"
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):
-            print(f"[{dt.now()}] Detected Tesla authentication failure (HTTP {response.status_code}). Attempting token refresh...")
-            if refresh_tesla_token(config):
-                headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
-                response = requests.get(url, headers=headers, timeout=15)
-        
-        # Check if vehicle is offline or asleep
-        is_asleep = False
-        if response.status_code != 200:
-            try:
-                err_data = response.json()
-                err_msg = err_data.get("error", "")
-                if "offline" in err_msg or "asleep" in err_msg:
+    
+    max_retries = 3
+    retry_delay = 5.0
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):
+                print(f"[{dt.now()}] Detected Tesla authentication failure (HTTP {response.status_code}). Attempting token refresh...")
+                if refresh_tesla_token(config):
+                    headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
+                    response = requests.get(url, headers=headers, timeout=15)
+            
+            # Check if vehicle is offline, asleep, or if request timed out
+            is_asleep = False
+            err_msg = ""
+            if response.status_code != 200:
+                try:
+                    err_data = response.json()
+                    err_msg = err_data.get("error", "")
+                except Exception:
+                    err_msg = response.text
+                
+                if "offline" in err_msg or "asleep" in err_msg or "timeout" in err_msg:
                     is_asleep = True
-            except Exception:
-                if "offline" in response.text or "asleep" in response.text:
-                    is_asleep = True
-                    
-        if is_asleep:
-            if not allow_wake_up:
-                print(f"[{dt.now()}] Vehicle is asleep/offline and allow_wake_up is False. Skipping wake-up.")
-                return {"asleep": True}
-            if wake_up_vehicle(config):
-                # Update header in case token refreshed during wake_up
-                headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
-                response = requests.get(url, headers=headers, timeout=15)
-                if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):
-                    print(f"[{dt.now()}] Detected Tesla authentication failure after wake_up (HTTP {response.status_code}). Attempting token refresh...")
-                    if refresh_tesla_token(config):
-                        headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
-                        response = requests.get(url, headers=headers, timeout=15)
+                        
+            if is_asleep:
+                if not allow_wake_up:
+                    print(f"[{dt.now()}] Vehicle is asleep/offline or API timed out (allow_wake_up=False). Skipping wake-up.")
+                    return {"asleep": True}
+                if wake_up_vehicle(config):
+                    # Update header in case token refreshed during wake_up
+                    headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
+                    response = requests.get(url, headers=headers, timeout=15)
+                    if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):
+                        print(f"[{dt.now()}] Detected Tesla authentication failure after wake_up (HTTP {response.status_code}). Attempting token refresh...")
+                        if refresh_tesla_token(config):
+                            headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
+                            response = requests.get(url, headers=headers, timeout=15)
 
-        if response.status_code == 200:
-            data = response.json().get("response", {})
-            drive_state = data.get("drive_state", {})
-            charge_state = data.get("charge_state", {})
-            return {
-                "latitude": drive_state.get("latitude", 0.0),
-                "longitude": drive_state.get("longitude", 0.0),
-                "charging_state": charge_state.get("charging_state", "Disconnected"),
-                "battery_level": charge_state.get("battery_level", 0),
-                "charge_limit_soc": charge_state.get("charge_limit_soc", 100)
-            }
-        print(f"[{dt.now()}] API error response from Tesla on /vehicle_data: {response.text}")
-        return None
-    except Exception as e:
-        print(f"[{dt.now()}] Connection failure to Tesla vehicle data API: {e}")
-        return None
+            if response.status_code == 200:
+                data = response.json().get("response", {})
+                drive_state = data.get("drive_state", {})
+                charge_state = data.get("charge_state", {})
+                return {
+                    "latitude": drive_state.get("latitude", 0.0),
+                    "longitude": drive_state.get("longitude", 0.0),
+                    "charging_state": charge_state.get("charging_state", "Disconnected"),
+                    "battery_level": charge_state.get("battery_level", 0),
+                    "charge_limit_soc": charge_state.get("charge_limit_soc", 100)
+                }
+            print(f"[{dt.now()}] API error response from Tesla on /vehicle_data (Attempt {attempt}/{max_retries}): {response.text}")
+        except requests.exceptions.RequestException as e:
+            print(f"[{dt.now()}] Connection failure to Tesla vehicle data API (Attempt {attempt}/{max_retries}): {e}")
+            
+        if attempt < max_retries:
+            time.sleep(retry_delay)
+            
+    return None
 
 def call_tesla_api(config, endpoint, payload=None):
     """Calls Tesla Fleet API or simulates it depending on configuration."""
@@ -428,29 +437,82 @@ def call_tesla_api(config, endpoint, payload=None):
         print(f"[{now_str}] [MOCK TESLA] Command /{endpoint} succeeded. Payload: {payload}. (Est. Vehicle SoC: {simulated_soc}%)")
         return True
 
-    # Real API implementation
-    headers = {
-        "Authorization": f"Bearer {config['TESLA_API_TOKEN']}",
-        "Content-Type": "application/json"
-    }
-    base_url = config.get("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com").rstrip("/")
-    url = f"{base_url}/api/1/vehicles/{config['TESLA_VIN']}/command/{endpoint}"
+    # Real API implementation using tesla-fleet-api signed commands
+    import asyncio
+    import aiohttp
+    from tesla_fleet_api import TeslaFleetApi
+    from tesla_fleet_api.tesla.vehicle.signed import VehicleSigned
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    private_key_path = os.path.join(BASE_DIR, "tesla_private_key.pem")
+    if not os.path.exists(private_key_path):
+        print(f"[{now_str}] Private key file not found at {private_key_path}. Cannot sign command.")
+        return False
+
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        if response.status_code == 401 or (response.status_code != 200 and "invalid authentication" in response.text):
-            print(f"[{now_str}] Detected Tesla authentication failure (HTTP {response.status_code}) on /{endpoint}. Attempting token refresh...")
-            if refresh_tesla_token(config):
-                headers["Authorization"] = f"Bearer {config['TESLA_API_TOKEN']}"
-                response = requests.post(url, headers=headers, json=payload, timeout=15)
-        if response.status_code == 200:
-            result = response.json().get("response", {}).get("result")
-            if result:
-                return True
-        print(f"[{now_str}] API error response from Tesla on /{endpoint}: {response.text}")
-        return False
+        with open(private_key_path, "rb") as f:
+            key_bytes = f.read()
+        private_key = load_pem_private_key(key_bytes, password=None)
     except Exception as e:
-        print(f"[{now_str}] Connection failure to Tesla Fleet API: {e}")
+        print(f"[{now_str}] Failed to load private key: {e}")
         return False
+
+    async def _execute_command():
+        print(f"[{now_str}] [call_tesla_api] Initializing aiohttp session with 20s timeout...")
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            region = None
+            server = config.get("TESLA_API_BASE_URL")
+            print(f"[{now_str}] [call_tesla_api] Creating TeslaFleetApi with server={server}")
+            api = TeslaFleetApi(
+                access_token=config["TESLA_API_TOKEN"],
+                session=session,
+                server=server,
+                region=region
+            )
+            # Set private key on api instance so VehicleSigned constructor can find it
+            api.private_key = private_key
+            
+            print(f"[{now_str}] [call_tesla_api] Initializing VehicleSigned for VIN {config['TESLA_VIN']}...")
+            vehicle = VehicleSigned(api, config["TESLA_VIN"])
+            
+            print(f"[{now_str}] [call_tesla_api] Dispatching signed command /{endpoint}...")
+            if endpoint == "charge_start":
+                return await vehicle.charge_start()
+            elif endpoint == "charge_stop":
+                return await vehicle.charge_stop()
+            elif endpoint == "set_charging_amps":
+                amps = payload.get("charging_amps") if payload else None
+                if amps is None:
+                    print(f"[{now_str}] Error: set_charging_amps requires 'charging_amps' payload.")
+                    return None
+                return await vehicle.set_charging_amps(amps)
+            else:
+                print(f"[{now_str}] Unsupported command endpoint: {endpoint}")
+                return None
+
+    try:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        print(f"[{now_str}] [call_tesla_api] Running event loop for signed command /{endpoint}...")
+        result = loop.run_until_complete(_execute_command())
+        if result:
+            print(f"[{now_str}] Command /{endpoint} executed successfully. Response: {result}")
+            return True
+        else:
+            print(f"[{now_str}] Command /{endpoint} returned empty response or failed.")
+            return False
+    except Exception as e:
+        print(f"[{now_str}] Connection/Execution failure to Tesla Fleet API on signed command /{endpoint}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 
 def calculate_target_amps(excess_watts, config):
     """Calculates charging current target based on excess watts and safety buffer."""
@@ -541,8 +603,17 @@ def run_solar_loop(override_time=None, mock_power=None):
     if excess_watts is None:
         return # Skip calculation if telemetry is missing
 
+    # Adjust excess_watts to include the car's current charging draw if it's active
+    actual_charging_watts = 0
+    if cache.get("charging", False):
+        active_amps = cache.get("amps", config["MIN_AMPS"])
+        actual_charging_watts = active_amps * config["VOLTAGE"]
+        
+    adjusted_excess_watts = excess_watts + actual_charging_watts
+    print(f"[{now}] Raw Excess: {excess_watts:.1f} W, Car Charging Draw: {actual_charging_watts:.1f} W, Adjusted Excess: {adjusted_excess_watts:.1f} W")
+
     # Append to rolling history
-    cache["solar_history"].append({"timestamp": now.isoformat(), "watts": excess_watts})
+    cache["solar_history"].append({"timestamp": now.isoformat(), "watts": adjusted_excess_watts})
     
     # Filter rolling history to include only elements in the window (window length + 2 min tolerance)
     cutoff = now - datetime.timedelta(minutes=config.get("HISTORY_WINDOW_MINUTES", 15) + 2)

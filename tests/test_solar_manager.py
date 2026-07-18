@@ -369,6 +369,46 @@ class TestE2EIntegration(unittest.TestCase):
         self.assertTrue(cache_2["charging"])
         self.assertEqual(cache_2["amps"], 11) # Unchanged!
         self.assertEqual(cache_2["last_command_time"], last_time_1)
+
+    def test_adjusted_excess_solar_includes_car_draw_when_charging(self):
+        # Setup cache to show car is already charging at 10A
+        tesla_solar_manager.write_cache({
+            "charging": True,
+            "amps": 10,
+            "vehicle_state": {
+                "latitude": self.test_config["LATITUDE"],
+                "longitude": self.test_config["LONGITUDE"],
+                "charging_state": "Charging",
+                "battery_level": 75,
+                "charge_limit_soc": 90
+            },
+            "last_sunrise_reset_date": "2026-06-21",
+            "solar_history": []
+        })
+        
+        # Inverter shows export of 500W (P_Grid = -500.0)
+        # With 10A draw at 240V active, potential excess = 500W + (10 * 240) = 2900W.
+        # Usable surplus = 2900W - 150W = 2750W.
+        # Calculated amps = 2750 // 240 = 11A.
+        MockFroniusAPIHandler.grid_power = -500.0
+        
+        tz = ZoneInfo(self.test_config["TIMEZONE"])
+        midday_time = dt(2026, 6, 21, 12, 0, 0, tzinfo=tz)
+        
+        with patch('tesla_solar_manager.get_tesla_vehicle_data') as mock_get:
+            mock_get.return_value = {
+                "latitude": self.test_config["LATITUDE"],
+                "longitude": self.test_config["LONGITUDE"],
+                "charging_state": "Charging",
+                "battery_level": 75,
+                "charge_limit_soc": 90
+            }
+            tesla_solar_manager.run_solar_loop(override_time=midday_time)
+            
+        updated_cache = tesla_solar_manager.read_cache()
+        self.assertTrue(updated_cache["charging"])
+        self.assertEqual(updated_cache["amps"], 11)
+
 class TestStateCachingBehavior(unittest.TestCase):
     def setUp(self):
         self.original_cache_path = tesla_solar_manager.CACHE_PATH
@@ -905,5 +945,53 @@ class TestStateCachingBehavior(unittest.TestCase):
         self.assertEqual(cache["vehicle_state"]["charging_state"], "Charging")
 
 
+class TestTelemetryRetryAndTimeout(unittest.TestCase):
+    @patch('tesla_solar_manager.time.sleep')
+    @patch('tesla_solar_manager.requests.get')
+    def test_get_tesla_vehicle_data_retry_on_timeout_response(self, mock_get, mock_sleep):
+        config = {
+            "MOCK_TESLA": False,
+            "TESLA_VIN": "test_vin",
+            "TESLA_API_TOKEN": "token",
+            "TESLA_API_BASE_URL": "https://fleet-api.prd.na.vn.cloud.tesla.com"
+        }
+        
+        # 1. Mock response returning a timeout error JSON
+        mock_resp_timeout = MagicMock()
+        mock_resp_timeout.status_code = 504
+        mock_resp_timeout.json.return_value = {"error": '{"error": "timeout"}'}
+        mock_resp_timeout.text = '{"error": "{\\"error\\": \\"timeout\\"}"}'
+        
+        # 2. Mock response returning 200 OK
+        mock_resp_success = MagicMock()
+        mock_resp_success.status_code = 200
+        mock_resp_success.json.return_value = {
+            "response": {
+                "drive_state": {"latitude": 10.0, "longitude": 20.0},
+                "charge_state": {"charging_state": "Stopped", "battery_level": 80, "charge_limit_soc": 90}
+            }
+        }
+        
+        # Test timeout parsing (should treat as asleep and return {"asleep": True} when allow_wake_up=False)
+        mock_get.return_value = mock_resp_timeout
+        data = tesla_solar_manager.get_tesla_vehicle_data(config, allow_wake_up=False)
+        self.assertEqual(data, {"asleep": True})
+        
+        # Test retry loop on request exceptions (2 failures, then 1 success)
+        import requests
+        mock_get.side_effect = [
+            requests.exceptions.ConnectTimeout("Connection timed out"),
+            requests.exceptions.ReadTimeout("Read timed out"),
+            mock_resp_success
+        ]
+        
+        data = tesla_solar_manager.get_tesla_vehicle_data(config, allow_wake_up=False)
+        self.assertIsNotNone(data)
+        self.assertEqual(data["charging_state"], "Stopped")
+        self.assertEqual(mock_get.call_count, 4) # 1 first check + 3 retries
+        self.assertEqual(mock_sleep.call_count, 2) # slept twice between retries
+
+
 if __name__ == '__main__':
     unittest.main()
+
