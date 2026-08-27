@@ -30,4 +30,8 @@ This document captures resolved bugs, architectural changes, key logical finding
    - **Context**: When the car was actively charging, the Fronius smart meter reported the net grid export (which drops by the amount the charger is consuming). The script evaluated this raw grid export directly against the 1200W minimum threshold, falsely concluding that there was insufficient excess solar and shutting down the charging loop.
    - **Decision**: Adjusted the `excess_watts` calculation to add the car's active charging draw back to the grid export reading when the charger is active. This represents the true available solar surplus (generation minus home load), stabilizing the control loop and preventing the system from immediately stopping a charge that it just initiated.
 
+7. **Tesla Wall Connector Local Ingestion & API Quota Protection (August 27, 2026)**:
+   - **Context**: Tesla Fleet API monthly credits were being consumed rapidly due to frequent cloud wakes when the car was away or unplugged, and live telemetry queries executing when solar export was negative.
+   - **Decision**: (1) Integrated local LAN polling of the Tesla Wall Connector Gen 3 (`GET http://<IP>/api/1/vitals`), providing real-time physical connection status (`vehicle_connected`) and contactor state at $0.00 cost. (2) Implemented Zero-Surplus Inaction: when the vehicle is not charging and surplus is below threshold, FreeCharge skips all Tesla Cloud calls. (3) Physical Gatekeeping: if the Wall Connector reports no vehicle connected, FreeCharge bypasses all cloud calls and stays idle. (4) Wake Throttling: enforced a 60-minute wake cooldown and 15-minute telemetry refresh.
+
 
