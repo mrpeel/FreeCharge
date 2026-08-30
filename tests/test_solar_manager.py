@@ -118,6 +118,29 @@ class TestCacheUtility(unittest.TestCase):
         self.assertEqual(read_state, test_state)
 
 
+class TestConfigLoading(unittest.TestCase):
+    def setUp(self):
+        self.original_config_path = tesla_solar_manager.CONFIG_PATH
+        self.temp_config = os.path.join(TEST_DIR, "temp_corrupt_config.json")
+        tesla_solar_manager.CONFIG_PATH = self.temp_config
+
+    def tearDown(self):
+        if os.path.exists(self.temp_config):
+            os.remove(self.temp_config)
+        tesla_solar_manager.CONFIG_PATH = self.original_config_path
+
+    def test_load_config_recovers_from_corrupted_json(self):
+        # Write corrupted JSON with trailing comma
+        with open(self.temp_config, "w") as f:
+            f.write('{\n  "VOLTAGE": 240,\n  "MIN_AMPS": 5,\n}')
+
+        config = tesla_solar_manager.load_config()
+        self.assertIsNotNone(config)
+        self.assertEqual(config["VOLTAGE"], 240)
+        self.assertEqual(config["MIN_AMPS"], 5)
+        self.assertEqual(config["TESLA_WALL_CONNECTOR_IP"], "192.168.1.60")
+
+
 class TestTeslaGating(unittest.TestCase):
     def test_is_vehicle_at_home(self):
         home_lat = -33.8688

@@ -71,18 +71,42 @@ if os.path.exists(ENV_PATH):
 
 def load_config():
     """Loads non-sensitive configuration parameters from config.json and merges them with .env parameters."""
-    with open(CONFIG_PATH, "r") as f:
-        config = json.load(f)
+    defaults = {
+        "FRONIUS_EXPORT_IS_POSITIVE": False,
+        "TIMEZONE": "Australia/Sydney",
+        "CITY_NAME": "Sydney",
+        "VOLTAGE": 240,
+        "MIN_AMPS": 5,
+        "MAX_AMPS": 32,
+        "BUFFER_WATTS": 150,
+        "LOCATION_TOLERANCE": 0.001,
+        "HISTORY_WINDOW_MINUTES": 15,
+        "POLLING_INTERVAL_MINUTES": 5,
+        "THROTTLE_INTERVAL_MINUTES": 10,
+        "TELEMETRY_REFRESH_MINUTES": 15,
+        "WAKE_COOLDOWN_MINUTES": 60,
+        "TESLA_WALL_CONNECTOR_IP": "192.168.1.60",
+        "MAX_LOG_DAYS": 30,
+        "DRY_RUN": True
+    }
+    config = defaults.copy()
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                user_config = json.load(f)
+                config.update(user_config)
+        except Exception as e:
+            print(f"[{dt.now()}] ERROR: Failed to parse {CONFIG_PATH} ({e}). Falling back to default settings.")
     
-    config["FRONIUS_IP"] = os.getenv("FRONIUS_IP", "192.168.1.150")
-    config["TESLA_API_BASE_URL"] = os.getenv("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com")
-    config["TESLA_VIN"] = os.getenv("TESLA_VIN", "5YJ3XXXXXXXXXXXXX")
-    config["TESLA_API_TOKEN"] = os.getenv("TESLA_API_TOKEN", "YOUR_TESLA_API_ACCESS_TOKEN")
-    config["TESLA_REFRESH_TOKEN"] = os.getenv("TESLA_REFRESH_TOKEN", "")
-    config["TESLA_CLIENT_ID"] = os.getenv("TESLA_CLIENT_ID", "")
-    config["TESLA_CLIENT_SECRET"] = os.getenv("TESLA_CLIENT_SECRET", "")
-    config["LATITUDE"] = float(os.getenv("LATITUDE", "-33.8688"))
-    config["LONGITUDE"] = float(os.getenv("LONGITUDE", "151.2093"))
+    config["FRONIUS_IP"] = os.getenv("FRONIUS_IP", config.get("FRONIUS_IP", "192.168.1.150"))
+    config["TESLA_API_BASE_URL"] = os.getenv("TESLA_API_BASE_URL", config.get("TESLA_API_BASE_URL", "https://fleet-api.prd.na.vn.cloud.tesla.com"))
+    config["TESLA_VIN"] = os.getenv("TESLA_VIN", config.get("TESLA_VIN", "5YJ3XXXXXXXXXXXXX"))
+    config["TESLA_API_TOKEN"] = os.getenv("TESLA_API_TOKEN", config.get("TESLA_API_TOKEN", "YOUR_TESLA_API_ACCESS_TOKEN"))
+    config["TESLA_REFRESH_TOKEN"] = os.getenv("TESLA_REFRESH_TOKEN", config.get("TESLA_REFRESH_TOKEN", ""))
+    config["TESLA_CLIENT_ID"] = os.getenv("TESLA_CLIENT_ID", config.get("TESLA_CLIENT_ID", ""))
+    config["TESLA_CLIENT_SECRET"] = os.getenv("TESLA_CLIENT_SECRET", config.get("TESLA_CLIENT_SECRET", ""))
+    config["LATITUDE"] = float(os.getenv("LATITUDE", config.get("LATITUDE", -33.8688)))
+    config["LONGITUDE"] = float(os.getenv("LONGITUDE", config.get("LONGITUDE", 151.2093)))
     
     config["TESLA_WALL_CONNECTOR_IP"] = os.getenv("TESLA_WALL_CONNECTOR_IP", config.get("TESLA_WALL_CONNECTOR_IP", "192.168.1.60"))
     
@@ -95,7 +119,7 @@ def load_config():
     config["MOCK_TESLA"] = mock_tesla_str in ("true", "1", "yes", "on")
     
     # Dry Run commands flag: defaults to True for safety
-    dry_run_str = os.getenv("DRY_RUN", "True").lower()
+    dry_run_str = os.getenv("DRY_RUN", str(config.get("DRY_RUN", "True"))).lower()
     config["DRY_RUN"] = dry_run_str in ("true", "1", "yes", "on")
     
     # Mock API failure rate (0.0 means always succeed)
