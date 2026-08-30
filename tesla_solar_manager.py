@@ -569,7 +569,20 @@ def call_tesla_api(config, endpoint, payload=None):
             asyncio.set_event_loop(loop)
             
         print(f"[{now_str}] [call_tesla_api] Running event loop for signed command /{endpoint}...")
-        result = loop.run_until_complete(_execute_command())
+        try:
+            result = loop.run_until_complete(_execute_command())
+        except Exception as cmd_err:
+            err_str = str(cmd_err).lower()
+            if "oauthexpired" in err_str or "oauth" in err_str or "token has expired" in err_str or "invalid_token" in err_str or "401" in err_str or "unauthorized" in err_str:
+                print(f"[{now_str}] [call_tesla_api] Detected Tesla OAuth expiration ({cmd_err}). Attempting token refresh...")
+                if refresh_tesla_token(config):
+                    print(f"[{now_str}] [call_tesla_api] Retrying signed command /{endpoint} with refreshed token...")
+                    result = loop.run_until_complete(_execute_command())
+                else:
+                    raise cmd_err
+            else:
+                raise cmd_err
+
         if result:
             print(f"[{now_str}] Command /{endpoint} executed successfully. Response: {result}")
             return True
