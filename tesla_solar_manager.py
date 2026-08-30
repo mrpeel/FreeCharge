@@ -711,11 +711,11 @@ def run_solar_loop(override_time=None, mock_power=None, mock_twc=None):
         if not is_connected:
             if current_charging:
                 print(f"[{now}] Vehicle disconnected from Wall Connector during active charge. Stopping charge...")
-                if call_tesla_api(config, "charge_stop"):
-                    cache["charging"] = False
-                    if cache.get("vehicle_state"):
-                        cache["vehicle_state"]["charging_state"] = "Disconnected"
-                    cache["last_command_time"] = now.isoformat()
+                call_tesla_api(config, "charge_stop")
+                cache["charging"] = False
+                if cache.get("vehicle_state"):
+                    cache["vehicle_state"]["charging_state"] = "Disconnected"
+                cache["last_command_time"] = now.isoformat()
             print(f"[{now}] Wall Connector: No vehicle connected. Gating failed: vehicle not plugged in. System idle ($0.00 cloud cost).")
             write_cache(cache)
             return
