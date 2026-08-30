@@ -590,9 +590,7 @@ def call_tesla_api(config, endpoint, payload=None):
             print(f"[{now_str}] Command /{endpoint} returned empty response or failed.")
             return False
     except Exception as e:
-        print(f"[{now_str}] Connection/Execution failure to Tesla Fleet API on signed command /{endpoint}: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[{now_str}] Tesla Fleet API command /{endpoint} failed: {e}")
         return False
 
 
